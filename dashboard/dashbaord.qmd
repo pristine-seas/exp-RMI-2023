@@ -9,6 +9,7 @@ logo: imgs/logo.png
 theme: yeti
 fig-width: 10
 fig-asp: 0.3
+self-contained: true
 params:
   month: "September - October"
   year: "2023"
