@@ -1,0 +1,1193 @@
+---
+title: "Expedition Explorer - Republic of the Marshall Islands 2023"
+format: 
+  dashboard:
+    orientation: columns
+    nav-buttons: [github]
+    github: https://github.com/pristine-seas/exp-RMI-2023
+logo: imgs/logo.png
+theme: yeti
+fig-width: 10
+fig-asp: 0.3
+params:
+  month: "September - October"
+  year: "2023"
+  # 2021 rates: https://www.cdc.gov/nchs/data/nvsr/nvsr72/nvsr72-01.pdf
+  us_cesarean_rate: 0.321 
+  us_preterm_rate:  0.1049
+  threshold_diff: 0.02
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, message=F, warning = F, echo = F}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+```
+
+```{r, eval = TRUE}
+load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+
+master_meta <- read_csv(file.path(exp_path, "data/primary/output/consolidated_expedition_metadata.csv"))
+
+master_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"))
+
+master_meta_shp <- sf::st_read(file.path(exp_path, "data/primary/processed/metadata/expedition_metadata.shp"))
+
+argo_track <- sf::st_read(file.path(exp_path, "data/primary/raw/argo_route.geojson")) 
+
+argo_nm <- round((st_length(argo_track)/10^3)*0.539957)
+
+data_size <- "18 Tb"
+```
+
+#  {.sidebar}
+
+This dashboard displays metadata for:
+
+|              |                     |
+|--------------|---------------------|
+| **Country** | Republic of the Marshall Island |
+| **Year**     | September, 2023  |
+| **Vessel**    | R/V Argo   |
+
+::: {.callout-note collapse="true"}
+## Disclaimer
+
+This is a test dashboard. 
+:::
+
+# All 
+
+## Column {width=65%}
+
+```{r eval = TRUE, include = T}
+library(mapview)
+
+master_meta_shp <- master_meta_shp %>% 
+  distinct(method, ps_stt_, locatin, geometry)
+
+mapview::mapview(master_meta_shp, 
+                 zcol = c(method = "method"), 
+                 legend = TRUE,
+                 col.regions = paletteer_d("ggthemes::Tableau_10", 10),
+                 map.types = c("Esri.WorldImagery"),
+                 layer.name = "Methods",
+                 popup = leafpop::popupTable(master_meta_shp,
+                                      zcol = c("method",
+                                               "ps_stt_",
+                                               "locatin")))
+```
+
+## Column {width=35%}
+
+```{r, eval = TRUE, include = T}
+master_meta |> 
+  filter(location %in% c("Bikar", "Bokak", "Bikini", "Rongerik")) |> 
+  group_by(location, method) |> 
+  summarize(n_stations = n_distinct(ps_station_id)) |> 
+  ungroup() |> 
+  pivot_wider(names_from = "location", values_from = "n_stations", values_fill = 0) |> 
+  mutate(Total = Bikar + Bikini + Bokak + Rongerik) |> 
+  gt::gt(rowname_col = "method") |> 
+  gt::tab_header(title = "Number of workstations in each island") |> 
+  gt::grand_summary_rows(fns = "sum") |> 
+  gt::tab_options(grand_summary_row.background.color = "lightblue")
+```
+
+### Row
+
+#### Column
+
+```{r eval = TRUE, include = T}
+mapview::mapview(argo_track, 
+                 map.types = c("Esri.WorldImagery"))
+```
+
+#### Column
+
+```{r eval = T, include = T}
+#| component: valuebox
+#| title: Nautical miles traveled
+list(
+  icon = "rocket",
+  color = "primary",
+  value = as.numeric(argo_nm)
+)
+```
+
+```{r eval = T, include = T}
+#| component: valuebox
+#| title: Hours underwater
+list(
+  icon = "water",
+  color = "primary",
+  value = 200
+)
+```
+
+```{r eval = T, include = T}
+#| component: valuebox
+#| title: Data collected
+list(
+  icon = "floppy2",
+  color = "primary",
+  value = data_size
+)
+```
+
+# Fish Surveys
+
+```{r  eval = TRUE}
+fish_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "fish")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r bikar, eval = TRUE, include = T}
+#| title: Bikar
+
+fish_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(fish_meta_sf |> 
+                                                 filter(location == "Bikar"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r Bokak, eval = TRUE, include = T}
+#| title: Bokak
+fish_meta_sf |> 
+  filter(location == "Bokak") |>
+    st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(fish_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r Bikini, eval = TRUE, include = T}
+#| title: Bikini
+fish_meta_sf |> 
+  filter(location == "Bikini") |>
+    st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(fish_meta_sf |> 
+                                                 filter(location == "Bikini"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r Rongerik, eval = TRUE, include = T}
+#| title: Rongerik
+fish_meta_sf |> 
+  filter(location == "Rongerik") |>
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(fish_meta_sf |> 
+                                                 filter(location == "Rongerik"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$fish |> 
+  group_by(location, exposure, habitat) |> 
+  summarize(n_stations = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = location, values_from = n_stations) |> 
+  gt::gt(rowname_col = "habitat") |> 
+  gt::tab_header(title = "Number of fish surveys by island, habitat, and exposure") 
+```
+
+### Row
+
+```{r eval = TRUE, include = T}
+exp_meta$fish |> 
+  distinct(location, ps_station_id, date, local_time, lat, lon, exposure, habitat, team_lead) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Fish survey locations") |> 
+  gt::opt_interactive(use_compact_mode = T)
+```
+
+# Benthic Surveys
+
+```{r  eval = TRUE}
+benthic_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "benthos")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+
+benthic_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(benthic_meta_sf |> 
+                                                 filter(location == "Bikar"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+
+benthic_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(benthic_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+
+benthic_meta_sf |> 
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(benthic_meta_sf |> 
+                                                 filter(location == "Bikini"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+
+benthic_meta_sf |> 
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(benthic_meta_sf |> 
+                                                 filter(location == "Rongerik"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$benthos |> 
+  group_by(location, exposure, habitat) |> 
+  summarize(n_stations = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = location, values_from = n_stations) |> 
+  gt::gt(rowname_col = "habitat") |> 
+  gt::tab_header(title = "Number of benthos surveys by island, habitat, and exposure") 
+```
+
+### Row
+
+```{r eval = TRUE, include = T}
+exp_meta$benthos |> 
+  distinct(location, ps_station_id, date, local_time, lat, lon, exposure, habitat, team_lead) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Benthos survey locations") |> 
+  gt::opt_interactive(use_compact_mode = T)
+```
+
+# eDNA
+
+```{r eval = TRUE}
+edna_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "eDNA")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+
+edna_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(edna_meta_sf |> 
+                                                 filter(location == "Bikar") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+
+edna_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(edna_meta_sf |> 
+                                                 filter(location == "Bokak") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+
+edna_meta_sf |> 
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(edna_meta_sf |> 
+                                                 filter(location == "Bikini") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+
+edna_meta_sf |> 
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Habitat",
+                   popup = leafpop::popupTable(edna_meta_sf |> 
+                                                 filter(location == "Rongerik") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$edna |> 
+  mutate(strata = if_else(depth_m == 0, "Surface", "Bottom")) |> 
+  group_by(location, strata) |> 
+  summarize(n_liters = sum(n_replicates)*2) |> 
+  pivot_wider(names_from = strata, values_from = n_liters) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Water filtered (liters) for eDNA extraction in each island")
+```
+
+### Row
+
+# Bruvs
+
+```{r  eval = TRUE}
+bruvs_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "bruvs")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+bruvs_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(bruvs_meta_sf |> 
+                                                 filter(location == "Bikar") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+bruvs_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(bruvs_meta_sf |> 
+                                                 filter(location == "Bokak") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+bruvs_meta_sf |> 
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(bruvs_meta_sf |> 
+                                                 filter(location == "Bikini") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+bruvs_meta_sf |> 
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(bruvs_meta_sf |> 
+                                                 filter(location == "Rongerik") ,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$bruvs |> 
+  group_by(location) |> 
+  summarize(n_deployments = n_distinct(ps_station_id),
+            min_depth = round(min(depth_m)),
+            max_depth = round(max(depth_m)),
+            depth_range = paste(min_depth, max_depth, sep = "-")) |> 
+  ungroup() |> 
+  select(location, depth_range, n_deployments) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of benthic BRUVS deployed in each island")
+```
+
+### Row
+
+# Pelagics
+
+```{r  eval = TRUE}
+pelagics_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "pelagics")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+pelagics_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   popup = leafpop::popupTable(pelagics_meta_sf |> 
+                                                 filter(location == "Bikar"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+pelagics_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   popup = leafpop::popupTable(pelagics_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+pelagics_meta_sf |> 
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   popup = leafpop::popupTable(pelagics_meta_sf |> 
+                                                 filter(location == "Bikini"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+pelagics_meta_sf |> 
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   popup = leafpop::popupTable(pelagics_meta_sf |> 
+                                                 filter(location == "Rongerik"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+## Column {width=30%}
+
+### Row
+
+# Dropcams
+
+```{r  eval = TRUE}
+dscm_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "dscm")
+
+
+dscm_meta_sf |> 
+  filter(location == "Bikar") |> 
+  ggplot()+
+  geom_sf(aes(col = depth_m))
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+dscm_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   #col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(dscm_meta_sf |> 
+                                                 filter(location == "Bikar"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date_in", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+dscm_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   #col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(dscm_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date_in", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+dscm_meta_sf |> 
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   #col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(dscm_meta_sf |> 
+                                                 filter(location == "Bikini"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date_in", 
+                                                        "depth_m")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+dscm_meta_sf |> 
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   #col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(dscm_meta_sf |> 
+                                                 filter(location == "Rongerik"),
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date_in", 
+                                                        "depth_m")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$dscm |> 
+  mutate(depth_cut = cut(depth_m, 
+                         breaks = c(0,200,500,1000,2500),
+                         labels = c("0 - 200 m", "200 - 500 m", "500 - 1,000 m", "1,000 - 2,500 m"))) |> 
+  group_by(location, depth_cut) |> 
+  summarize(n_deployments = n_distinct(ps_station_id)) |> 
+  ungroup() |> 
+  pivot_wider(names_from = location, values_from = n_deployments) |> 
+  gt::gt(rowname_col = "depth_cut") |> 
+  gt::tab_header(title = "Number of deep sea cameras deployed in each island by depth strata")
+```
+
+### Row
+
+# Sub 
+
+```{r  eval = TRUE}
+sub_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "sub")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+sub_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("max_depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(sub_meta_sf |> 
+                                                 filter(location == "Bikar"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "max_depth_m",
+                                                        "max_depth_temp", 
+                                                        "observer_1",
+                                                        "observer_2"
+                                                        )))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+sub_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("max_depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(sub_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "max_depth_m",
+                                                        "max_depth_temp", 
+                                                        "observer_1",
+                                                        "observer_2"
+                                                        )))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+sub_meta_sf |> 
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("max_depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(sub_meta_sf |> 
+                                                 filter(location == "Bikini"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "max_depth_m",
+                                                        "max_depth_temp", 
+                                                        "observer_1",
+                                                        "observer_2"
+                                                        )))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+sub_meta_sf |> 
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("max_depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(sub_meta_sf |> 
+                                                 filter(location == "Rongerik"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "max_depth_m",
+                                                        "max_depth_temp", 
+                                                        "observer_1",
+                                                        "observer_2"
+                                                        )))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$sub |> 
+  group_by(location) |> 
+  summarize(n_deployments = n_distinct(ps_station_id),
+            min_depth = min(max_depth_m),
+            max_depth = max(max_depth_m)) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of submersible surveys in each island")
+```
+
+### Row
+
+# Birds
+
+```{r  eval = TRUE}
+birds_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "birds")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+birds_meta_sf |>  
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   col.regions = "yellow",
+                   col = "yellow",
+                   popup = leafpop::popupTable(birds_meta_sf |> 
+                                                 filter(location == "Bikar"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "vessel")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+birds_meta_sf |>  
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   col.regions = "yellow",
+                   col = "yellow",
+                   popup = leafpop::popupTable(birds_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "vessel")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+birds_meta_sf |>  
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   col.regions = "yellow",
+                   col = "yellow",
+                   popup = leafpop::popupTable(birds_meta_sf |> 
+                                                 filter(location == "Bikini"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "vessel")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+birds_meta_sf |>  
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   col.regions = "yellow",
+                   col = "yellow",
+                   popup = leafpop::popupTable(birds_meta_sf |> 
+                                                 filter(location == "Rongerik"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "vessel")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$birds |>
+  mutate(type = if_else(vessel == "Land", "Land", "Sea")) |> 
+  group_by(location, type) |> 
+  summarize(n_surveys = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = type, values_from = n_surveys) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of bird surveys in each island")
+```
+
+### Row
+
+# Vegetation
+
+```{r  eval = TRUE}
+veg_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "vegetation")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikar
+veg_meta_sf |>  
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   popup = leafpop::popupTable(veg_meta_sf |> 
+                                                 filter(location == "Bikar"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "survey_type",
+                                                        "size_m",
+                                                        "team_lead")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+veg_meta_sf |>  
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   popup = leafpop::popupTable(veg_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "survey_type",
+                                                        "size_m",
+                                                        "team_lead")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+veg_meta_sf |>  
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   legend = FALSE,
+                   popup = leafpop::popupTable(veg_meta_sf |> 
+                                                 filter(location == "Rongerik"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "survey_type",
+                                                        "size_m",
+                                                        "team_lead")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$vegetation |>
+  group_by(location, survey_type) |> 
+  summarize(n_surveys = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = survey_type, values_from = n_surveys) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of vegetation surveys per island")
+```
+
+### Row
+
+# Traverses
+
+```{r  eval = TRUE}
+traverse_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "traverses")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bikini
+traverse_meta_sf |>  
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   col.regions = "pink",
+                   col = "pink",
+                   legend = FALSE,
+                   popup = leafpop::popupTable(traverse_meta_sf |> 
+                                                 filter(location == "Bikini") ,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "USGS_traverse_id",
+                                                        "distance_m",
+                                                        "team_lead")))
+```
+
+```{r eval = TRUE, include = T}
+#| title: Rongerik
+traverse_meta_sf |>  
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(map.types = c("Esri.WorldImagery"),
+                   col.regions = "pink",
+                   col = "pink",
+                   legend = FALSE,
+                   popup = leafpop::popupTable(traverse_meta_sf |> 
+                                                 filter(location == "Rongerik") ,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "USGS_traverse_id",
+                                                        "distance_m",
+                                                        "team_lead")))
+```
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$traverses |>
+  group_by(location) |> 
+  summarize(n_surveys = n_distinct(ps_station_id),
+            cum_dist_m = sum(distance_m)) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of traverses and distance covered (m2) per island")
+```
+
+### Row
+
+# Plastics
+
+```{r  eval = TRUE}
+plastics_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "plastics")
+```
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+```{r eval = TRUE, include = T}
+#| title: Bokak
+plastics_meta_sf |>  
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(legend = FALSE,
+                   map.types = c("Esri.WorldImagery"),
+                   popup = leafpop::popupTable(plastics_meta_sf |> 
+                                                 filter(location == "Bokak"),
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date",
+                                                        "team_lead")))
+```
+
+## Column {width=30%}
+
+### Row
+
+# Turtles
+
+## Column {width=70%}
+
+### Column {.tabset}
+
+## Column {width=30%}
+
+```{r eval = TRUE, include = T}
+exp_meta$turtles |> 
+  group_by(location, sublocation) |> 
+  summarize(n_surveys = n()) |> 
+    ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of turle surveys per island")
+```
+
+### Row
+

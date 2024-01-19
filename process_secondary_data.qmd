@@ -1,0 +1,313 @@
+---
+title: "Process secondary data"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+```
+
+
+# bikar and bokak 12 nm
+
+```{r}
+buffer_12nm <- sf::st_read(file.path(exp_path, 
+                      "data/secondary/raw/eez_12nm/eez_12nm.shp"))
+
+box = c(xmin = 167.9965, ymin = 11.9301, xmax = 171.9825, ymax = 14.9932)
+
+buffer_12nm <- st_crop(buffer_12nm, box)
+
+buffer_redfoot_booby <- buffer_12nm |> 
+  mutate(species = "Red-footed booby",
+         dist_m = "86 km") |> 
+  st_buffer(dist = (46 - 12)*1852) |> 
+  select(species, dist_m)
+
+buffer_shearwater <- buffer_12nm |> 
+  st_buffer(dist = (54 - 12)*1852)|> 
+  mutate(species = "Wedge-tailed shearwater",
+         dist_m = "100 km") |> 
+  select(species, dist_m)
+  
+buffer_sooty <- buffer_12nm |> 
+  st_buffer(dist = (240 - 12)*1852)|> 
+   mutate(species = "Sooty tern",
+         dist_m = "440 km") |> 
+  select(species, dist_m)
+  
+buffer_frigate <- buffer_12nm |> 
+  st_buffer(dist = (180 - 12)*1852)|> 
+  mutate(species = "Great frigatebird",
+         dist_m = "334 km") |> 
+  select(species, dist_m)
+  
+buffer_greyreefs <- buffer_12nm |> 
+  st_buffer(dist = (35 - 12)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m)
+
+buffer_turtle <- buffer_12nm |> 
+  st_buffer(dist = (19 - 12)*1852) |> 
+  mutate(species = "Green sea turtle",
+         dist_m = "35 km") |> 
+  select(species, dist_m)
+
+buffer_yellowfin <- buffer_12nm |> 
+  st_buffer(dist = (400 - 12)*1852) |> 
+  mutate(species = "Yellowfin tuna",
+         dist_m = "745 km") |> 
+  select(species, dist_m)
+
+buffers <- bind_rows(buffer_yellowfin, buffer_turtle, buffer_greyreefs, 
+          buffer_frigate, buffer_sooty, buffer_shearwater, buffer_redfoot_booby) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4)
+
+buffers |> 
+  sf::st_write(file.path(exp_path, "data/secondary/processed/species_buffers.shp"), append = F)
+
+ggplot()+
+  geom_sf(data = buffer_12nm)+
+  geom_sf(data = buffers, aes(col = species), fill = "transparent")
+```
+
+
+# Bikini sites
+
+```{r}
+read_table(file.path(exp_path, "data/secondary/raw/Beger_Bikini_Sites.txt")) |> 
+  janitor::clean_names() |> 
+  sf::st_as_sf(coords = c("longitude", "latitude"), 
+               crs = 4236) |> 
+  sf::write_sf(file.path(exp_path, "data/secondary/processed/Beger_Bikini_sites.shp"))
+```
+
+# MIMRA stations
+
+```{r}
+mimra_site <- readxl::read_xlsx(file.path(exp_path, "data/secondary/raw/MIMRA/MIMRA_sites.xlsx")) |> 
+  janitor::clean_names() |> 
+  sf::st_as_sf(coords = c("lon", "lat"), crs = 4236)
+  
+mimra_site |> 
+  sf::st_write(file.path(exp_path, "data/secondary/processed/MIMRA_sites.gpkg"))
+```
+
+# 2019 expedition
+
+```{r}
+read_table(file.path(exp_path, "data/secondary/raw/2019-expedition/Bikar&Bokak_Sites.txt")) |> 
+  janitor::clean_names() |> 
+  select(island, site_id = unique, reef_type = site, lat = id, lon = reef) |> 
+  gt::gt() |> 
+  gt::gtsave(file.path(exp_path, 
+                       "data/secondary/raw/2019-expedition/", "2019_bikar_bokak_sites.docx"))
+
+
+  janitor::clean_names() |> 
+  sf::st_as_sf(coords = c("lon", "lat"), crs = 4236)
+```
+
+# Fish codes
+
+```{r}
+rongelap_fish_data <- readxl::read_xlsx(file.path(
+  exp_path,
+  "data/secondary/raw/Rongelap_fish_appendix.xlsx"),
+  sheet = "rank_print")
+
+rongelap_fish_data <- rongelap_fish_data |> 
+  select(taxon = genus_species, freqxabun) |> 
+  arrange(desc(freqxabun)) |> 
+  filter(!is.na(taxon))
+
+fish_codes <- rongelap_fish_data |> 
+  distinct(taxon)
+
+clean_fish_names <- bdc::bdc_clean_names(fish_codes$taxon) %>% 
+  janitor::clean_names() %>% 
+  select(taxon = scientific_name, 
+         taxon_clean = names_clean) %>% 
+  mutate(taxon_clean = coalesce(taxon_clean, 
+                                taxadb::clean_names(taxon, lowercase = F))) %>% 
+  distinct(taxon, taxon_clean) 
+
+clean_fish_names %>% 
+  filter(taxon!= taxon_clean)
+```
+
+```{r}
+fish_gnr <- taxize::gnr_resolve(clean_fish_names$taxon_clean, 
+                                  best_match_only = T,
+                                  canonical = F,
+                                  with_canonical_ranks = T,
+                                  data_source_ids = c(9)) %>% # WORMS
+  filter(submitted_name != matched_name2) %>% 
+  distinct(submitted_name, score, taxon_gnr = matched_name2)
+
+clean_fish_names <- clean_fish_names |> 
+  left_join(fish_gnr, 
+            by = c("taxon_clean"="submitted_name")) |> 
+  mutate(taxon_clean = coalesce(taxon_gnr, taxon_clean)) |> 
+  select(taxon, taxon_clean) |> 
+  distinct()
+
+clean_fish_names |> 
+  filter(taxon != taxon_clean)
+```
+
+```{r worms}
+worms_validation <- clean_fish_names$taxon_clean %>% 
+  split(ceiling(seq_along(clean_fish_names$taxon_clean)/40)) %>% 
+  furrr::future_map_dfr(worrms::wm_records_names) %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(scientificname)) %>% 
+  mutate(rank = str_to_lower(rank),
+         taxon_id = if_else(!is.na(valid_aphia_id),
+                            paste0("WORMS:", valid_aphia_id),
+                            NA_character_)) %>% 
+  select(taxon_clean = scientificname, status, taxon_valid_name = valid_name, 
+         taxon_rank = rank, taxon_id, taxon_authority = valid_authority) %>% 
+  distinct()
+
+duped_taxa_worms <- worms_validation %>% 
+  janitor::get_dupes(taxon_clean) 
+
+deduped_taxa_worms <- duped_taxa_worms %>% 
+  filter(status %in% c("accepted")) %>% 
+  select(-dupe_count)
+
+worms_validation <- worms_validation %>% 
+  group_by(taxon_clean) %>% 
+  filter(n() <= 1) %>% # remove duplicates
+  bind_rows(deduped_taxa_worms) # add deduped
+
+worms_validation %>% 
+  filter(taxon_valid_name != taxon_clean) 
+
+fish_taxa <- clean_fish_names %>% 
+  left_join(worms_validation) 
+```
+
+```{r}
+rongelap_fish_taxa <- fish_taxa |> 
+  left_join(rongelap_fish_data)
+
+rongelap_fish_taxa |> 
+  write_csv(file.path(exp_path, "data/secondary/processed/rongelap_fish_taxa.csv"))
+```
+
+```{r}
+sli_codes <- read_csv(file.path("~/marine.data.science@ngs.org - Google Drive/My Drive/Pristine Seas/SCIENCE/expeditions/SLI-2023",
+                                "data/primary/raw/fish/cleaned_up_fish_codes.csv")) |> 
+  select(taxon, taxon_valid_name, taxon_code)
+
+niue_codes <- read_csv(file.path("~/marine.data.science@ngs.org - Google Drive/My Drive/Pristine Seas/SCIENCE/expeditions/Niue-2023",
+                                "data/primary/raw/fish/fish_taxa_list.csv"))|> 
+  select(taxon, taxon_valid_name, taxon_code)
+
+sli_codes$taxon[sli_codes$taxon == "Cirripectes sp"] <- "Cirripectes sp."
+
+niue_codes$taxon_valid_name[niue_codes$taxon == "Parupeneus insularis"] <- "Parupeneus insularis"
+
+ps_codes <- full_join(niue_codes, sli_codes) |> 
+  distinct() |> 
+  filter(!taxon_valid_name %in% c("Mirolabrichthys pascalus"),
+         !taxon %in% c("Centropyge loricula", "Amblyeleotris katherine")) 
+
+ps_codes |> 
+  janitor::get_dupes(taxon)
+```
+
+```{r}
+ps_codes$taxon_code[ps_codes$taxon_valid_name == "Acanthurus nigricans"] <- "AC.NIGRI"
+
+ps_codes$taxon_code[ps_codes$taxon == "Cirripectes sp."] <- "CIRR.SP"
+
+ps_codes$taxon_code[ps_codes$taxon_valid_name == "Chaetodon flavocoronatus"] <- "CH.FLAVO"
+
+ps_codes <- ps_codes |>
+  filter(!taxon_code %in% c("CH.TRIF", "GY.MELAT", "HA.MELA", "CH.LUNUT", "HA.MARG", "AC.NIGO")) |> 
+  distinct()
+
+ps_codes |> 
+  janitor::get_dupes(taxon_valid_name)
+```
+
+```{r}
+ps_codes <- ps_codes |> 
+  full_join(fish_taxa |> 
+              filter(!taxon_valid_name %in% ps_codes$taxon_valid_name) |> 
+              distinct(taxon_valid_name, taxon)) 
+
+make_ps_taxon_code <- function(taxa_name){
+  
+  if(str_count(taxa_name, '\\w+') == 1){
+    
+    taxa_code <- str_to_upper(paste(substr(taxa_name, 1, 4), "sp", sep = "."))
+    
+    }
+  
+  else{
+    
+    genus <- word(taxa_name,1)
+    
+    species <- word(taxa_name, 2)
+    
+    taxa_code <- paste(substr(genus, 1, 2),
+                       substr(species, 1,4), sep = ".") |> 
+      str_to_upper()
+  }
+  
+  return(taxa_code)
+  
+}
+
+ps_codes <- ps_codes |> 
+  rowwise() |> 
+  mutate(tmp = case_when(is.na(taxon_code) ~ make_ps_taxon_code(taxon_valid_name),
+                         TRUE ~ taxon_code),
+         taxon_code = coalesce(tmp, taxon_code)) |> 
+  select(-tmp)
+
+ps_codes |> 
+  janitor::get_dupes(taxon_code)
+```
+
+```{r}
+ps_codes$taxon_code[ps_codes$taxon_valid_name == "Paragobiodon xanthosoma"] <- "PA.XANTS"
+ps_codes$taxon_code[ps_codes$taxon_valid_name == "Parapercis xanthozona"] <- "PA.XANTZ"
+ps_codes$taxon_code[ps_codes$taxon_valid_name == "Parupeneus barberinus"] <- "PA.BARBE"
+ps_codes$taxon_code[ps_codes$taxon_valid_name == "Parupeneus barberinoides"] <- "PA.BARBO"
+ps_codes$taxon_code[ps_codes$taxon_valid_name == "Chilomycterus reticulatus"] <- "CH.RETIC"
+
+ps_codes <- ps_codes |> 
+  filter(taxon_valid_name != "Gymnocranius")
+
+ps_codes |> 
+  janitor::get_dupes(taxon_valid_name)
+```
+
+```{r}
+ps_codes |> 
+  write_csv(file.path(exp_path, "data/primary/raw/pacific_taxa_list.csv"))
+```
+

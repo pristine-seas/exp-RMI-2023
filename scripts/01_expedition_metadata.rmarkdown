@@ -1,0 +1,1431 @@
+---
+title: "RMI 2023 expedition report"
+subtitle: "Trip summary"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+theme: cosmo
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10, echo = F}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+```
+
+```{r uvs}
+uvs_meta <- readxl::read_xlsx(file.path(exp_path, "data/primary/raw/fish/RMI_2023_fish_fieldbook_AMF.xlsx")) |> 
+  as_tibble()
+
+uvs_meta <- uvs_meta |> 
+  mutate(expedition = "RMI_2023", 
+         uvs_station_id = str_replace(ps_site_id, "RMI", "RMI_2023") |>
+           str_replace("UVS", "uvs"),
+         date = lubridate::dmy(dd_mm_yyyy),
+         local_time = hms::as_hms(local_time)) |> 
+  select(expedition,  uvs_station_id, location = island, date, local_time, lat, lon, alternative_site_id,
+         habitat, exposure, team_lead, everything(), 
+         -dd_mm_yyyy, -sand_station_id, -sand_station_depth, -ps_site_id, -team_lead)
+
+uvs_meta$alternative_site_id[uvs_meta$alternative_site_id == "N/A"] <- NA
+```
+
+```{r fish}
+fish_meta <- readxl::read_xlsx(file.path(exp_path, "data/primary/raw/fish/RMI_2023_fish_fieldbook_AMF.xlsx"),
+                               sheet = "fish_obs") |> 
+  as_tibble() |> 
+  mutate(uvs_station_id = str_replace(ps_site_id, "RMI", "RMI_2023") |>
+           str_replace("UVS", "uvs")) |> 
+  group_by(uvs_station_id, diver, depth_strata, depth_m) |>
+  summarize(n_replicates = n_distinct(transect)) |> 
+  ungroup() |> 
+  left_join(uvs_meta)
+
+fish_meta <- fish_meta |> 
+  mutate(method = "Fish surveys",
+         diver = if_else(diver == "AMF", "Alan Friedlander", "diver"),
+         ps_station_id = str_replace(uvs_station_id,  "uvs", "fish")) |> 
+  select(expedition, method, ps_station_id, location, date, local_time, lat, lon, depth_strata, depth_m, 
+         n_replicates, alternative_site_id, habitat, exposure, team_lead = diver, everything()) 
+
+fish_meta |> 
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'fish', append=FALSE)
+```
+
+```{r benthos}
+benthos_kike <- readxl::read_xlsx(file.path(exp_path,
+                            "data/primary/raw/benthos/MARSHALLS_Transsects-rough_kike.xlsx"),
+                  n_max = 2, 
+                  col_names = FALSE) %>%
+  janitor::clean_names() %>%
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble() |> 
+  remove_rownames() %>% 
+  janitor::clean_names() |> 
+  set_names(c("site_number", "depth_m")) |> 
+  mutate(team_lead = "Kike Ballesteros") |> 
+  select(site_number, depth_m, team_lead)
+
+benthos_molly <- readxl::read_xlsx(file.path(exp_path,
+                            "data/primary/raw/benthos/RMI_LPI_Molly.xlsx"),
+                  n_max = 2, 
+                  col_names = FALSE) %>%
+  janitor::clean_names() %>%
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble() |> 
+  remove_rownames() %>% 
+  janitor::clean_names() |> 
+  set_names(c("site_number", "depth_m")) |> 
+  mutate(team_lead = "Molly Timmers") |> 
+  select(site_number, depth_m, team_lead)
+
+benthos_meta <-  bind_rows(benthos_molly, benthos_kike) |> 
+  mutate(site_number = parse_number(site_number),
+         uvs_station_id = paste("RMI_2023_uvs",
+                                formatC(site_number,
+                                        width = 2, 
+                                        flag = 0), 
+                                sep = "_"),
+         depth_m = as.numeric(depth_m),
+         depth_strata = if_else(depth_m == 20, "Deep", "Shallow"),
+         method = "Benthic survey") |> 
+  arrange(site_number) |> 
+  group_by(site_number) |> 
+  mutate(ps_station_id = paste("RMI_2023_benthos",
+                               formatC(cur_group_id(), 
+                                       width = 2, 
+                                       flag = 0),
+                               sep = "_")) |> 
+  ungroup() |> 
+  group_by(site_number, depth_strata) |> 
+  mutate(n_replicates = n()) |> 
+  ungroup() |> 
+  distinct(ps_station_id, method, uvs_station_id, depth_strata, depth_m, n_replicates, team_lead)
+
+benthos_meta <- benthos_meta |> 
+  left_join(uvs_meta) |> 
+  select(expedition, method, ps_station_id, location, date, local_time, lat, lon, depth_strata, 
+         depth_m,n_replicates, alternative_site_id, habitat, exposure, team_lead , everything()) 
+
+benthos_meta |> 
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'benthos', 
+         append=FALSE)
+```
+
+```{r edna}
+edna_meta_raw <- readxl::read_xlsx(file.path(exp_path,
+                                        "data/primary/raw/edna/RMI_2023_edna_fieldbook.xlsx")) |> 
+  janitor::clean_names() 
+
+edna_meta <- edna_meta_raw |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Environmental DNA",
+         team_lead = "Molly Timmers",
+         ps_station_id = str_replace(ps_station_id, "RMI", "RMI_2023"),
+         paired_station_id = str_replace(paired_station_id, "RMI", "RMI_2023"),
+         across(c(date), lubridate::ymd),
+         across(c(filter_time, collection_time), hms::as_hms)) |> 
+  select(-lat,-long) |> 
+  left_join(uvs_meta |>
+              mutate(ps_station_id = str_replace(uvs_station_id, "s_", "s_0")) |> 
+              select(paired_station_id = ps_station_id, location, habitat, exposure, lat, lon), 
+            by = c("paired_station_id")) |> 
+  replace_na(list(location = "Bikini", habitat = "Lagoon", exposure = "Lagoon")) 
+
+non_paired <- edna_meta |> 
+  filter(is.na(lon)) |> 
+  select(-lat, -lon) |> 
+  left_join(edna_meta_raw |> distinct(ps_sample_id, lat, lon = long)) 
+
+edna_meta <- non_paired |> 
+  bind_rows(edna_meta |> 
+              filter(!is.na(lon))) |> 
+  arrange(ps_station_id) |> 
+  select(expedition, method, ps_station_id, ps_sample_id, paired_station_id, location, habitat, exposure, date, lat, lon, depth_m, collection_time, filter_time, water_liters, preservative, filter_type, site_photos,mosaics, daily_negative, team_lead, notes)
+
+#write_csv(edna_meta, file.path(exp_path, "data/primary/processed/metadata/RMI_2023_edna_metadata.csv"))
+
+edna_meta <- edna_meta |> 
+  group_by(expedition, method, ps_station_id, paired_station_id, location, habitat, exposure, date, lat, lon, depth_m, collection_time,
+           preservative, filter_type, site_photos,mosaics, daily_negative, team_lead) |> 
+  summarize(n_replicates = n()) |> 
+  ungroup() |> 
+  select(expedition, method, ps_station_id, paired_station_id, location, habitat, exposure, date, lat, lon, depth_m, 
+         n_replicates, everything())
+
+edna_meta |> 
+  ungroup() |>
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'eDNA', append = F)
+```
+
+```{r birds}
+birds_meta <- readxl::read_xlsx(file.path(exp_path,
+                                        "data/primary/raw/birds/RMI_2023_birds_fieldbook.xlsx"),
+                                sheet = "Birds",range = "A1:P124") |> 
+  janitor::clean_names()
+
+birds_meta <- birds_meta |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Seabird survey",
+         team_lead = "Chris Thompson",
+         ps_station_id = str_replace(transect, "RMI", "RMI_2023"),
+         across(c(date), lubridate::ymd),
+         across(c(time_start, time_stop), hms::as_hms),
+         duration_mins = hms::hms(minutes  = duration)) |> 
+  select(expedition, method, ps_station_id, location, date, time_start, time_stop, duration_mins, 
+         lon_start = long_start, lat_start,  lon_stop = long_stop, lat_stop, distance_km = distance,vessel, string, in_or_out, team_lead,
+         everything(), -sublocation, -transect, -duration)
+
+bird_tracks <- list.files(path=file.path(exp_path,
+                          "data/primary/raw/birds/Transect ebird GPS tracks"),
+           pattern=".+\\.gpx",
+           full.names=TRUE) |>
+  map_dfr(.f = sf::st_read, layer = "tracks")
+
+bird_tracks$ps_station_id <- list.files(path = file.path(exp_path,
+                              "data/primary/raw/birds/Transect ebird GPS tracks"),
+             pattern=".+\\.gpx",
+             full.names=F) |> 
+  substring(first = 0, last = 13)
+
+bird_tracks <- bird_tracks |> 
+  select(ps_station_id) |> 
+  arrange(ps_station_id) |> 
+  mutate(ps_station_id = str_replace(ps_station_id, "RMI", "RMI_2023"))
+
+birds_sf <- birds_meta |> 
+  filter(!is.na(lon_start)) |> 
+  st_as_sf(coords = c("lon_start", "lat_start"), crs = 4326) |> 
+  select(ps_station_id) |> 
+  bind_rows(bird_tracks) 
+
+birds_meta_sf <- birds_meta |> 
+  left_join(distinct(birds_sf))
+
+st_write(birds_meta_sf, 
+         dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'birds',
+         append=FALSE)
+```
+
+```{r bruvs}
+bruvs_meta <- readxl::read_xlsx(file.path(exp_path,
+                                          "data/primary/raw/bruvs/RMI_2023_bruvs_fieldbook.xlsx")) |> 
+  janitor::clean_names() |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Benthic BRUVS",
+         local_time = hms::as_hms(time_in),
+         team_lead = "Juan Mayorga") |> 
+  select(expedition, method, ps_station_id, location, date, local_time, lat, lon, depth_m,
+         habitat = bottom_type, exposure = sublocation, rig, cam_r, cam_l,  team_lead, notes, everything(), -time_in)
+
+#write_csv(bruvs_meta, file.path(exp_path, "data/primary/processed/metadata/RMI_2023_bruvs_metadata.csv"))
+
+bruvs_meta |> 
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'bruvs', append=FALSE)
+```
+
+```{r dscm}
+dscm_meta <- readxl::read_xlsx(file.path(exp_path,
+                                         "data/primary/raw/dscm/RMI_2023_dscm_fieldbook.xlsx")) |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Deep sea cameras",
+         ps_station_id = str_replace(ps_station_id, "RMI", "RMI_2023"),
+         across(c(date_in, date_out), lubridate::ymd),
+         across(c(time_in, time_out, recording_time_hrs), hms::as_hms),
+         mission_duration = hms::as_hms(mission_duration_hrs)) |> 
+  select(expedition, method, ps_station_id, location, date_in, time_in, lon_in, lat_in,  
+         date_out, time_out, lon_out, lat_out, mission_duration, 
+         recording_time = recording_time_hrs, depth_m, habitat , dscm_id, team_lead,
+         everything(), -sublocation, -mission_duration_hrs) 
+
+#write_csv(dscm_meta, file.path(exp_path, "data/primary/processed/metadata/RMI_2023_dscm_metadata.csv"))
+
+dscm_meta |> 
+  st_as_sf(coords = c("lon_in", "lat_in"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+           layer = 'dscm', append=FALSE)
+```
+
+```{r microplastics}
+plastics_meta <- readxl::read_xlsx(file.path(exp_path,
+                                        "data/primary/raw/microplastics/RMI_2023_plastics_fieldbook.xlsx")) |> 
+  janitor::clean_names()
+
+plastics_meta <- plastics_meta |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Microplastics",
+         collecting_method = "Bottle",
+         team_lead = "Whitney Goodell",
+         ps_station_id = str_replace(ps_station_id, "RMI", "RMI_2023"),
+         across(c(date), lubridate::ymd),
+         across(c(time), hms::as_hms)) |> 
+  select(expedition, method, ps_station_id, location, date, time, lat, lon,  team_lead, everything(), -filterer)
+
+#write_csv(plastics_meta, file.path(exp_path, "data/primary/processed/metadata/RMI_2023_plastics_metadata.csv"))
+
+plastics_meta |> 
+  filter(!is.na(lon)) |> 
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path,  "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'plastics', append = F)
+```
+
+```{r pelagics}
+pcam <- readxl::read_xlsx(file.path(exp_path,
+                                    "data/primary/raw/pelagics/RMI_2023_pelagics_fieldbook.xlsx")) %>%
+  janitor::clean_names() |> 
+  select(-nat_geo_opcode)
+  
+pelagics_meta <- pcam |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Pelagic BRUVS",
+         team_lead = "Chris Thompson",
+         ps_station_id = str_replace(string, "DMA_P", "RMI_2023_pcam"),
+         across(c(date), lubridate::ymd),
+         across(c(time_in, time_out), hms::as_hms),
+         depth_m = 10) |> 
+  select(expedition, method, ps_station_id, opcode, location, date, time_in, time_out, 
+         lon_in = long_in, lat_in,  lon_out = long_out, lat_out, depth_m, rig, left_cam, right_cam, bait, team_lead,
+         scan_notes = species_notes, field_comments,
+         everything(), -string, -sublocation)
+
+#write_csv(pelagics_meta, file.path(exp_path, "data/primary/processed/metadata/RMI_2023_pelagics_metadata.csv"))
+
+pelagics_meta |> 
+  st_as_sf(coords = c("lon_in", "lat_in"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'pelagics', append = F)
+```
+
+```{r sub}
+sub_meta <- readxl::read_xlsx(file.path(exp_path,
+                                   "data/primary/raw/sub/RMI_2023_sub_metadata.xlsx"),) %>% 
+  janitor::clean_names() |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Submersible dive",
+         ps_station_id = str_replace(ps_station_id, "RMI", "RMI_2023"),
+         date = lubridate::ymd(date_dd_mm_yyyy),
+         across(c(dive_start, resurface, bottom_time), hms::as_hms),
+         across(c(ends_with("longitude"), ends_with("latitude")) ,
+                ~str_remove_all(., "N|W|E|S") |> 
+                  str_trim() |> 
+                  str_squish() |> 
+                  str_replace_all(pattern = "\\'", replacement =  " "))) |> 
+  rowwise() |> 
+  mutate(across(c(ends_with("longitude"), ends_with("latitude")),
+                ~measurements::conv_unit(., from = 'deg_dec_min', to = 'dec_deg') |> 
+                  as.numeric() |> 
+                  round(digits = 4))) |> 
+  select(ps_station_id, location, everything()) %>% 
+  mutate(method = "Submersible survey") |> 
+  select(expedition, method, ps_station_id, location, date, dive_start_time = dive_start, resurface_time = resurface, bottom_time, 
+         surface_start_lon = surface_start_longitude, surface_start_lat = surface_start_latitude,
+         bottom_start_lat = bottom_start_latitude, bottom_start_lon = bottom_start_longitude,
+         bottom_end_lat = bottom_end_latitude, bottom_end_lon = bottom_end_longitude,
+         surface_end_lon = surface_end_longitude, surface_end_lat = surface_end_latitude, max_depth_m = max_depth,
+         everything(), -date_dd_mm_yyyy) 
+
+#write_csv(sub_meta, file.path(exp_path, "data/primary/processed/metadata/RMI_2023_pelagics_metadata.csv"))
+
+sub_meta |> 
+  mutate(lat = coalesce(bottom_start_lat, surface_start_lat),
+         lon = coalesce(bottom_start_lon, surface_start_lon)) |> 
+  filter(!is.na(lat)) |> 
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'sub', append = F)
+```
+
+```{r traverses}
+traverse_teams <- readxl::read_xlsx(file.path(exp_path,
+                                        "data/primary/raw/traverses/RMI_2023_traverses_fieldbook.xlsx")) |> 
+  janitor::clean_names() |> 
+  select(traverse_id = traverse, island, team)
+
+traverses_shp <- sf::st_read(file.path(exp_path,
+                                        "data/secondary/processed/Traverses/usgs_traverses.shp")) |> 
+  janitor::clean_names() |> 
+  select(traverse_id = traverse_i, everything(),-angle, -angle_unit, -shape_leng)
+  
+traverses_meta <- traverse_teams |> 
+  left_join(traverses_shp |> 
+                st_drop_geometry() ) |> 
+  rename(team_lead = team) |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Traverse",
+         ps_station_id = paste("RMI_2023_traverse", 
+                               formatC(row_number(), width = 2, flag = 0),
+                               sep = "_"),
+         distance_m = if_else(dist_unit == "Feet", distance*0.3048, distance)) |> 
+  select(expedition, method, ps_station_id, USGS_traverse_id = traverse_id, location = island, distance_m, everything(),
+         -distance, -dist_unit) 
+
+#write_csv(traverses_meta, file.path(exp_path, "data/primary/processed/metadata/RMI_2023_traverses_metadata.csv"))
+
+traverses_meta |> 
+  left_join(traverses_shp) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+           layer = 'traverses', append = F)
+```
+
+```{r turtles}
+turtles_meta <- readxl::read_xlsx(file.path(exp_path,
+                                            "data/primary/raw/turtles/RMI_2023_turtles_fieldbook.xlsx")) |> 
+  janitor::clean_names() |> 
+  mutate(expedition = "RMI_2023", 
+         method = "Turtle nest survey",
+         team_lead = "Ryan Jenkinson",
+         ps_station_id = paste("RMI_2023_turtles", 
+                               formatC(row_number(), width = 2, flag = 0),
+                               sep = "_")) |> 
+  select(expedition, method, ps_station_id,  location = atoll, sublocation = island, 
+         date, species = spp, crawls, nest_pits, team_lead, notes)
+```
+
+```{r vegetation}
+veg_metadata <- readxl::read_xlsx(file.path(exp_path,
+                                    "data/primary/raw/vegetation/vegetation_surveys.xlsx")) %>%
+  mutate(expedition = "RMI_2023", 
+         method = "Vegetation survey",
+         ps_station_id = str_replace(ps_station_id, "RMI", "RMI_2023"),
+         team_lead = "Kike Ballesteros",
+         survey_type = if_else(survey_type == "flora", "Flora relative abundance", "Pisonia forest density")) |> 
+  select(expedition, method, ps_station_id, location, survey_type, lat, lon, size_m, team_lead)
+
+veg_metadata |> 
+  st_as_sf(coords = c("lon","lat"), crs = 4326) |> 
+  st_write(dsn = file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+         layer = 'vegetation', append = F)
+```
+
+```{r export}
+exp_meta <- list(vegetation = veg_metadata, turtles = turtles_meta, fish = fish_meta, benthos = benthos_meta, birds = birds_meta, bruvs = bruvs_meta, dscm = dscm_meta, edna = edna_meta, plastics = plastics_meta, sub = sub_meta,  traverses = traverses_meta, pelagics = pelagics_meta)
+
+save(exp_meta,
+     file = file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+```
+
+```{r master}
+master_meta <- fish_meta |> 
+  select(-alternative_site_id, -exposure, -habitat, -notes, -depth_strata, -uvs_station_id) |> 
+  bind_rows(benthos_meta |> 
+              select(-alternative_site_id, -exposure, -habitat, -notes, -depth_strata,-uvs_station_id)) |> 
+   bind_rows(edna_meta |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date, local_time = collection_time, lat, lon, n_replicates, depth_m, team_lead)) |>
+    bind_rows(bruvs_meta |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date, local_time, lat, lon, depth_m, team_lead)) |> 
+  bind_rows(dscm_meta |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date = date_in, local_time = time_in, lat = lat_in, lon = lon_in, depth_m, team_lead)) |> 
+    bind_rows(sub_meta |> 
+              mutate(lat = coalesce(bottom_start_lat, surface_start_lat),
+                     lon = coalesce(bottom_start_lon, surface_start_lon),
+                     team_lead = paste(observer_1, observer_2, sep = " and "),
+                     depth_m = max_depth_m) |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date, local_time = dive_start_time, lat, lon, depth_m, team_lead)) |> 
+    bind_rows(pelagics_meta |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date, local_time = time_in, lat = lat_in, lon = lon_in, team_lead, depth_m)) |> 
+  bind_rows(birds_meta |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date, local_time = time_start, lat = lat_start, lon = lon_start, team_lead)) |>
+  bind_rows(plastics_meta |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date, local_time = time, lat, lon, team_lead)) |> 
+  bind_rows(traverses_meta |> 
+              distinct(expedition, method, ps_station_id, location,  team_lead)) |> 
+  bind_rows(turtles_meta |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, date, team_lead)) |> 
+  bind_rows(veg_metadata |> 
+              distinct(expedition, method, ps_station_id, 
+                     location, lat, lon, team_lead))
+
+master_meta |>
+  write_csv(file.path(exp_path, "data/primary/output/consolidated_expedition_metadata.csv"))
+
+master_meta |> 
+  filter(!is.na(lat)) |> 
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |> 
+  sf::st_write(file.path(exp_path, "data/primary/processed/metadata/expedition_metadata.shp"), 
+               append = F)
+```
+
+```{r, eval = TRUE}
+load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+
+master_meta <- read_csv(file.path(exp_path, "data/primary/output/consolidated_expedition_metadata.csv"))
+
+master_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"))
+
+master_meta_shp <- sf::st_read(file.path(exp_path, "data/primary/processed/metadata/expedition_metadata.shp"))
+```
+
+
+# Summary of work 
+
+
+```{r, eval = TRUE, include = T}
+master_meta |> 
+  filter(location %in% c("Bikar", "Bokak", "Bikini", "Rongerik")) |> 
+  group_by(location, method) |> 
+  summarize(n_stations = n_distinct(ps_station_id)) |> 
+  ungroup() |> 
+  pivot_wider(names_from = "location", values_from = "n_stations") |> 
+  gt::gt(rowname_col = "method") |> 
+  gt::tab_header(title = "Number of workstations in each island") 
+```
+
+```{r eval = TRUE, include = T}
+library(mapview)
+master_meta_shp <- master_meta_shp %>% 
+  distinct(method, ps_stt_, locatin, geometry)
+
+mapview::mapview(master_meta_shp, 
+                 zcol = c(method = "method"), 
+                 legend = TRUE,
+                 col.regions = paletteer_d("ggthemes::Tableau_10", 10),
+                 map.types = c("Esri.WorldImagery"),
+                 layer.name = "Methods",
+                 popup = leafpop::popupTable(master_meta_shp,
+                                      zcol = c("method",
+                                               "ps_stt_",
+                                               "locatin")))
+```
+
+```{r YSI}
+# raw_colnames <- stringr::str_to_lower(c("ps_station_id","DATE",	"TIME","DATE_corrected","TIME_corrected","SITE",	"DATA ID",	"GPS Latitude", "GPS Longitude",	"Barometer (mmHg)", "Chlorophyll (RFU)",	"Chlorophyll (µg/L)",	"PE (RFU)",	"PE (ug/L)",	"ODO (% Sat)",	"ODO (mg/L)", "Cond (µS/cm)",	"Sp Cond (µS/cm)",	"Sal (psu)",	"nLFCond (µS/cm)",	"TDS (mg/L)",	"Temp (∞F)",	"Resistivity (ohms-cm)",	"Sigma-T (s t)", "Sigma (s)", "pH",	"pH (mV)",	"Pressure (psi a)", "Depth (m)", 	"Vertical Position (m)"))
+# 
+# ysi_data <- list.files(file.path(exp_path, 
+#                      "data/primary/raw/ysi"), 
+#            full.names = T, 
+#            pattern = "KorDSS") %>% 
+#   purrr::map_dfr(.f = read_csv,
+#                  skip = 1, 
+#                  col_names = raw_colnames, 
+#                  col_types = "cctctnnnnnnnnnnnnnnnnnnnnnnnnn")
+# 
+# ysi_data <- ysi_data |> 
+#   mutate(ps_station_id  = str_replace(ps_station_id, "RMI_YSI", "RMI_2023_ysi") |> 
+#            str_replace("RMY_YSI", "RMI_2023_ysi")) |> 
+#   arrange(ps_station_id) |> 
+#   select(ps_station_id, contains(c("ph","(")))
+# 
+# ysi_data <- ysi_data |>
+#   mutate(ps_station_id  = str_replace(ps_station_id, "ysi", "uvs")) |>
+#   left_join(uvs_meta)
+```
+
+
+# Fish Surveys
+
+
+```{r  eval = TRUE}
+fish_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "fish")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$fish |> 
+  group_by(location, exposure, habitat) |> 
+  summarize(n_stations = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = location, values_from = n_stations) |> 
+  gt::gt(rowname_col = "habitat") |> 
+  gt::tab_header(title = "Number of fish surveys by island, habitat, and exposure") 
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+fish_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Methods",
+                   popup = leafpop::popupTable(fish_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+fish_meta_sf |> 
+  filter(location == "Bokak") |>
+    st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Methods",
+                   popup = leafpop::popupTable(fish_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$fish |> 
+  distinct(location, ps_station_id, date, local_time, lat, lon, exposure, habitat, team_lead) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Fish survey locations") |> 
+  gt::opt_interactive(use_compact_mode = T)
+```
+
+
+# Benthic surveys
+
+
+```{r  eval = TRUE}
+benthic_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "benthos")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$benthos |> 
+  group_by(location, exposure, habitat) |> 
+  summarize(n_stations = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = location, values_from = n_stations) |> 
+  gt::gt(rowname_col = "habitat") |> 
+  gt::tab_header(title = "Number of benthos surveys by island, habitat, and exposure") 
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+benthic_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Methods",
+                   popup = leafpop::popupTable(benthic_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+benthic_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Methods",
+                   popup = leafpop::popupTable(benthic_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$benthos |> 
+  distinct(location, ps_station_id, date, local_time, lat, lon, exposure, habitat, team_lead) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Benthos survey locations") |> 
+  gt::opt_interactive(use_compact_mode = T)
+```
+
+
+# eDNA
+
+
+```{r  eval = TRUE}
+edna_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "eDNA")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$edna |> 
+  mutate(strata = if_else(depth_m == 0, "Surface", "Bottom")) |> 
+  group_by(location, strata) |> 
+  summarize(n_liters = sum(n_replicates)*2) |> 
+  pivot_wider(names_from = strata, values_from = n_liters) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Water filtered (liters) for eDNA extraction in each island")
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+edna_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Methods",
+                   popup = leafpop::popupTable(edna_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+edna_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "habitat"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Methods",
+                   popup = leafpop::popupTable(edna_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$edna |> 
+  distinct(location, ps_station_id, date, collection_time, lat, lon, depth_m, n_replicates, team_lead) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "eDNA sampling locations") |> 
+  gt::opt_interactive(use_compact_mode = T)
+```
+
+
+# Benthic BRUVS
+
+
+```{r  eval = TRUE}
+bruvs_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "bruvs")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$bruvs |> 
+  group_by(location) |> 
+  summarize(n_deployments = n_distinct(ps_station_id),
+            min_depth = round(min(depth_m)),
+            max_depth = round(max(depth_m)),
+            depth_range = paste(min_depth, max_depth, sep = "-")) |> 
+  ungroup() |> 
+  select(location, depth_range, n_deployments) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of benthic BRUVS deployed in each island")
+```
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+bruvs_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(bruvs_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+bruvs_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c(method = "depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(bruvs_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$bruvs |> 
+  distinct(location, ps_station_id, date, local_time, lat, lon, depth_m, team_lead) |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Benthic BRUVS deployment locations") |> 
+  gt::opt_interactive(use_compact_mode = T)
+```
+
+
+# Pelagic BRUVS
+
+
+```{r  eval = TRUE}
+pelagics_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "pelagics")
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+pelagics_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Location",
+                   popup = leafpop::popupTable(pelagics_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+pelagics_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   col.regions = paletteer_d("ggthemes::Tableau_10", 3),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Location",
+                   popup = leafpop::popupTable(pelagics_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "depth_m")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$pelagics |> 
+  group_by(location, ps_station_id, date,  depth_m, team_lead) |> 
+  summarize(local_time = first(time_in), 
+            lat = first(lat_in), 
+            lon = first(lon_out)) |> 
+  ungroup() |> 
+  select(location, ps_station_id, date, local_time, lat, lon,  depth_m, team_lead) |> 
+  gt::gt() |> 
+  gt::tab_header(title = "Benthic BRUVS deployment locations") |> 
+  gt::opt_interactive(use_compact_mode = T) |> 
+  gt::tab_footnote(footnote = "coordinates and time of the first rig")
+```
+
+
+# Deep Sea Cameras
+
+
+```{r  eval = TRUE}
+dscm_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "dscm")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$dscm |> 
+  mutate(depth_cut = cut(depth_m, 
+                         breaks = c(0,200,500,1000,2500),
+                         labels = c("0 - 200 m", "200 - 500 m", "500 - 1,000 m", "1,000 - 2,500 m"))) |> 
+  group_by(location, depth_cut) |> 
+  summarize(n_deployments = n_distinct(ps_station_id)) |> 
+  ungroup() |> 
+  pivot_wider(names_from = location, values_from = n_deployments) |> 
+  gt::gt(rowname_col = "depth_cut") |> 
+  gt::tab_header(title = "Number of deep sea cameras deployed in each island by depth strata")
+```
+
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+dscm_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(dscm_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date_in", 
+                                                        "depth_m")))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+dscm_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(dscm_meta_sf,
+                                               zcol = c("method",
+                                                        "habitat",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date_in", 
+                                                        "depth_m")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$dscm |> 
+  select(location, ps_station_id, date = date_in, local_time = time_in, 
+         lat = lat_in, lon = lon_in,  recording_time, depth_m, team_lead) |> 
+  gt::gt() |> 
+  gt::tab_header(title = "Deep sea camera deployment locations") |> 
+  gt::opt_interactive(use_compact_mode = T) 
+```
+
+
+# Submersible surveys
+
+
+```{r  eval = TRUE}
+sub_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "sub")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$sub |> 
+  group_by(location) |> 
+  summarize(n_deployments = n_distinct(ps_station_id),
+            min_depth = min(max_depth_m),
+            max_depth = max(max_depth_m)) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of submersible surveys in each island")
+```
+
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+sub_meta_sf |> 
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("max_depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(sub_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "max_depth_m",
+                                                        "max_depth_temp", 
+                                                        "observer_1",
+                                                        "observer_2"
+                                                        )))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+sub_meta_sf |> 
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("max_depth_m"), 
+                   legend = TRUE,
+                   col.regions = paletteer_c("grDevices::Viridis", 5),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "Depth (m)",
+                   popup = leafpop::popupTable(sub_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "max_depth_m",
+                                                        "max_depth_temp", 
+                                                        "observer_1",
+                                                        "observer_2"
+                                                        )))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$sub |> 
+  select(location, ps_station_id, date, local_time = dive_start_time, 
+         lat = surface_start_lat, lon = surface_start_lon, max_depth_m, observer_1, observer_2,
+         team_lead = pilot) |> 
+  gt::gt() |> 
+  gt::tab_header(title = "Deep sea camera deployment locations") |> 
+  gt::opt_interactive(use_compact_mode = T) 
+```
+
+
+# Birds
+
+
+```{r  eval = TRUE}
+birds_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "birds")
+
+birds_meta_sf
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$birds |>
+  mutate(type = if_else(vessel == "Land", "Land", "Sea")) |> 
+  group_by(location, type) |> 
+  summarize(n_surveys = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = type, values_from = n_surveys) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of bird surveys in each island")
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+birds_meta_sf |>  
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   #col.regions = c(paletteer_c("grDevices::Viridis", 5),"white"),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "location",
+                   popup = leafpop::popupTable(birds_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date", 
+                                                        "vessel")))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+birds_meta_sf |>  
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   #col.regions = c(paletteer_c("grDevices::Viridis", 5),"white"),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "location",
+                   popup = leafpop::popupTable(birds_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date",
+                                                        "vessel")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$birds |> 
+  select(location, ps_station_id, date, local_time = time_start, 
+         lat = lat_start, lon = lon_start, distance_km, duration_mins, team_lead) |> 
+  gt::gt() |> 
+  gt::tab_header(title = "Deep sea camera deployment locations") |> 
+  gt::opt_interactive(use_compact_mode = T) 
+```
+
+
+
+
+# Vegetation surveys
+
+
+```{r  eval = TRUE}
+veg_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "vegetation")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$vegetation |>
+  group_by(location, survey_type) |> 
+  summarize(n_surveys = n_distinct(ps_station_id)) |> 
+  pivot_wider(names_from = survey_type, values_from = n_surveys) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of vegetation surveys per island")
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikar
+
+
+```{r eval = TRUE, include = T}
+veg_meta_sf |>  
+  filter(location == "Bikar") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   #col.regions = c(paletteer_c("grDevices::Viridis", 5),"white"),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "location",
+                   popup = leafpop::popupTable(veg_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "survey_type",
+                                                        "size_m",
+                                                        "team_lead")))
+```
+
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+veg_meta_sf |>  
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   #col.regions = c(paletteer_c("grDevices::Viridis", 5),"white"),
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "location",
+                   popup = leafpop::popupTable(veg_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "survey_type",
+                                                        "size_m",
+                                                        "team_lead")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$vegetation |> 
+  select(location, ps_station_id, survey_type,
+         lat, lon , plot_size_m2 = size_m, team_lead) |> 
+  gt::gt() |> 
+  gt::tab_header(title = "Vegetation survey locations") |> 
+  gt::opt_interactive(use_compact_mode = T) 
+```
+
+
+# Traverses
+
+
+```{r  eval = TRUE}
+traverse_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "traverses")
+```
+
+```{r eval = TRUE, include = T}
+exp_meta$traverses |>
+  group_by(location) |> 
+  summarize(n_surveys = n_distinct(ps_station_id),
+            cum_dist_m = sum(distance_m)) |> 
+  ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of traverses and distance covered (m2) per island")
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bikini
+
+
+```{r eval = TRUE, include = T}
+traverse_meta_sf |>  
+  filter(location == "Bikini") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "location",
+                   popup = leafpop::popupTable(traverse_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "USGS_traverse_id",
+                                                        "distance_m",
+                                                        "team_lead")))
+```
+
+
+## Rongerik
+
+
+```{r eval = TRUE, include = T}
+traverse_meta_sf |>  
+  filter(location == "Rongerik") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "location",
+                   popup = leafpop::popupTable(traverse_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "USGS_traverse_id",
+                                                        "distance_m",
+                                                        "team_lead")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$traverses |> 
+  select(-expedition) |> 
+  gt::gt() |> 
+  gt::tab_header(title = "Traverse locations") |> 
+  gt::opt_interactive(use_compact_mode = T) 
+```
+
+
+# Microplastics
+
+
+```{r  eval = TRUE}
+plastics_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                            layer = "plastics")
+```
+
+
+## Maps
+
+::: {.panel-tabset}
+
+## Bokak
+
+
+```{r eval = TRUE, include = T}
+plastics_meta_sf |>  
+  filter(location == "Bokak") |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("location"), 
+                   legend = TRUE,
+                   map.types = c("Esri.WorldImagery"),
+                   layer.name = "location",
+                   popup = leafpop::popupTable(plastics_meta_sf,
+                                               zcol = c("method",
+                                                        "ps_station_id",
+                                                        "location",
+                                                        "date",
+                                                        "team_lead")))
+```
+
+
+:::
+
+## Metadata
+
+
+```{r eval = TRUE, include = T}
+exp_meta$plastics |> 
+  select(location, ps_station_id, date, local_time = time, lat, lon, team_lead) |> 
+  gt::gt() |> 
+  gt::tab_header(title = "Traverse locations") |> 
+  gt::opt_interactive(use_compact_mode = T) 
+```
+
+
+# Seaturtles
+
+
+```{r eval = TRUE, include = T}
+exp_meta$turtles |> 
+  group_by(location, sublocation) |> 
+  summarize(n_surveys = n()) |> 
+    ungroup() |> 
+  gt::gt(rowname_col = "location") |> 
+  gt::tab_header(title = "Number of traverses and distance covered (m2) per island")
+```
+
