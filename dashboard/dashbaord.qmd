@@ -26,6 +26,7 @@ library(paletteer)
 library(sf)
 library(terra)
 library(tidyverse)
+library(plotly)
 
 knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
 
@@ -34,6 +35,8 @@ PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
 exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
 
 ps_data_path <- file.path(ps_science_path, "datasets/")
+
+ggthemr::ggthemr('light')
 ```
 
 ```{r, eval = TRUE}
@@ -56,21 +59,21 @@ data_size <- "18 Tb"
 
 This dashboard displays metadata for:
 
-|              |                     |
-|--------------|---------------------|
+|             |                                 |
+|-------------|---------------------------------|
 | **Country** | Republic of the Marshall Island |
-| **Year**     | September, 2023  |
-| **Vessel**    | R/V Argo   |
+| **Year**    | September, 2023                 |
+| **Vessel**  | R/V Argo                        |
 
 ::: {.callout-note collapse="true"}
 ## Disclaimer
 
-This is a test dashboard. 
+This is a test dashboard.
 :::
 
-# All 
+# All
 
-## Column {width=65%}
+## Column {width="65%"}
 
 ```{r eval = TRUE, include = T}
 library(mapview)
@@ -90,7 +93,7 @@ mapview::mapview(master_meta_shp,
                                                "locatin")))
 ```
 
-## Column {width=35%}
+## Column {width="35%"}
 
 ```{r, eval = TRUE, include = T}
 master_meta |> 
@@ -152,20 +155,41 @@ list(
 ```{r  eval = TRUE}
 fish_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
                             layer = "fish")
+
+fish_meta <- exp_meta$fish
+
+load(file = file.path(exp_path, "data/primary/output/fish_surveys.Rdata"))
+
+summary_by_strata <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location, exposure, habitat)) |> 
+  group_by(location, ps_station_id, depth_strata, depth_m, exposure, habitat) |> 
+  summarise(n_taxa = n_distinct(taxon_valid_name[ind_m2 > 0]),
+            across(c("ind_m2",  "gr_m2"), sum, na.rm = T)) |> 
+  ungroup()
+
+summary_by_taxa <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location)) |> 
+  group_by(location, taxon_valid_name) |>
+  summarise(frq = 100*sum(gr_m2 > 0)/n(),
+            across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
+  ungroup() |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic, family, class, order))
 ```
 
-## Column {width=70%}
+## Column {width="40%"}
 
 ### Column {.tabset}
 
-```{r bikar, eval = TRUE, include = T}
+```{r Bikar, eval = TRUE, include = T}
 #| title: Bikar
 
 fish_meta_sf |> 
   filter(location == "Bikar") |> 
+  left_join(summary_by_strata |> select(ps_station_id, depth_strata, gr_m2)) |> 
   st_jitter(factor = 0.001) |> 
   mapview::mapview(zcol = c("habitat"), 
                    legend = TRUE,
+                   cex = c("gr_m2"),
                    col.regions = paletteer_d("ggthemes::Tableau_10", 3),
                    map.types = c("Esri.WorldImagery"),
                    layer.name = "Habitat",
@@ -177,55 +201,92 @@ fish_meta_sf |>
                                                         "location",
                                                         "date", 
                                                         "depth_m")))
+
+summary_by_taxa |> 
+  filter(location %in% c("Bikar")) |> 
+  slice_max(gr_m2, n = 10) |> 
+  mutate_if(is.numeric, round, 3) |> 
+  select(-location) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family)) |> 
+  select(common_family, taxon_valid_name, frq, ind_m2, gr_m2) |> 
+  gt::gt(rowname_col = "common_family") |> 
+  gt::tab_header(title = "Reef fish with largest contribution to total biomass (g/m2)")
 ```
 
 ```{r Bokak, eval = TRUE, include = T}
 #| title: Bokak
 fish_meta_sf |> 
-  filter(location == "Bokak") |>
-    st_jitter(factor = 0.001) |> 
-  mapview::mapview(zcol = c(method = "habitat"), 
+  filter(location == "Bokak") |> 
+  left_join(summary_by_strata |> select(ps_station_id, depth_strata, gr_m2)) |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("habitat"), 
                    legend = TRUE,
+                   cex = c("gr_m2"),
                    col.regions = paletteer_d("ggthemes::Tableau_10", 3),
                    map.types = c("Esri.WorldImagery"),
                    layer.name = "Habitat",
                    popup = leafpop::popupTable(fish_meta_sf |> 
-                                                 filter(location == "Bokak"),
+                                                 filter(location == "Bikar"),
                                                zcol = c("method",
                                                         "habitat",
                                                         "ps_station_id",
                                                         "location",
                                                         "date", 
                                                         "depth_m")))
+
+
+summary_by_taxa |> 
+  filter(location %in% c("Bokak")) |> 
+  slice_max(gr_m2, n = 10) |> 
+  mutate_if(is.numeric, round, 3) |> 
+  select(-location) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family)) |> 
+  select(common_family, taxon_valid_name, frq, ind_m2, gr_m2) |> 
+  gt::gt(rowname_col = "common_family") |> 
+  gt::tab_header(title = "Reef fish with largest contribution to total biomass (g/m2)")
 ```
 
 ```{r Bikini, eval = TRUE, include = T}
 #| title: Bikini
 fish_meta_sf |> 
-  filter(location == "Bikini") |>
-    st_jitter(factor = 0.001) |> 
-  mapview::mapview(zcol = c(method = "habitat"), 
+  filter(location == "Bikini") |> 
+  left_join(summary_by_strata |> select(ps_station_id, depth_strata, gr_m2)) |> 
+  st_jitter(factor = 0.001) |> 
+  mapview::mapview(zcol = c("habitat"), 
                    legend = TRUE,
+                   cex = c("gr_m2"),
                    col.regions = paletteer_d("ggthemes::Tableau_10", 3),
                    map.types = c("Esri.WorldImagery"),
                    layer.name = "Habitat",
                    popup = leafpop::popupTable(fish_meta_sf |> 
-                                                 filter(location == "Bikini"),
+                                                 filter(location == "Bikar"),
                                                zcol = c("method",
                                                         "habitat",
                                                         "ps_station_id",
                                                         "location",
                                                         "date", 
                                                         "depth_m")))
+
+summary_by_taxa |> 
+  filter(location %in% c("Bikini")) |> 
+  slice_max(gr_m2, n = 10) |> 
+  mutate_if(is.numeric, round, 3) |> 
+  select(-location) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family)) |> 
+  select(common_family, taxon_valid_name, frq, ind_m2, gr_m2) |> 
+  gt::gt(rowname_col = "common_family") |> 
+  gt::tab_header(title = "Reef fish with largest contribution to total biomass (g/m2)")
 ```
 
 ```{r Rongerik, eval = TRUE, include = T}
 #| title: Rongerik
 fish_meta_sf |> 
-  filter(location == "Rongerik") |>
+  filter(location == "Rongerik") |> 
+  left_join(summary_by_strata |> select(ps_station_id, depth_strata, gr_m2)) |> 
   st_jitter(factor = 0.001) |> 
-  mapview::mapview(zcol = c(method = "habitat"), 
+  mapview::mapview(zcol = c("habitat"), 
                    legend = TRUE,
+                   cex = c("gr_m2"),
                    col.regions = paletteer_d("ggthemes::Tableau_10", 3),
                    map.types = c("Esri.WorldImagery"),
                    layer.name = "Habitat",
@@ -237,37 +298,81 @@ fish_meta_sf |>
                                                         "location",
                                                         "date", 
                                                         "depth_m")))
+
+summary_by_taxa |> 
+  filter(location %in% c("Rongerik")) |> 
+  slice_max(gr_m2, n = 10) |> 
+  mutate_if(is.numeric, round, 3) |> 
+  select(-location) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family)) |> 
+  select(common_family, taxon_valid_name, frq, ind_m2, gr_m2) |> 
+  gt::gt(rowname_col = "common_family") |> 
+  gt::tab_header(title = "Reef fish with largest contribution to total biomass (g/m2)")
 ```
 
-## Column {width=30%}
+## Column {width="60%"}
 
 ```{r eval = TRUE, include = T}
-exp_meta$fish |> 
-  group_by(location, exposure, habitat) |> 
-  summarize(n_stations = n_distinct(ps_station_id)) |> 
-  pivot_wider(names_from = location, values_from = n_stations) |> 
-  gt::gt(rowname_col = "habitat") |> 
-  gt::tab_header(title = "Number of fish surveys by island, habitat, and exposure") 
+summary_by_taxa |> 
+  filter(location %in% c("Bikar", "Bokak")) |> 
+  group_by(order, family, common_family) |> 
+  summarize(n_taxa = n_distinct(taxon_valid_name[frq > 0]),
+            across(c("ind_m2", "gr_m2"), 
+                   sum, na.rm = T)) |> 
+  filter(n_taxa > 0) |> 
+  ungroup() |> 
+  ggplot(aes(area = n_taxa, 
+             label = paste(family, n_taxa, sep = "\n"),
+             fill = order,
+             subgroup = order)) +
+  treemapify::geom_treemap(show.legend = F)+
+  treemapify::geom_treemap_text(colour = "black", place = "middle", reflow = T, min.size = 3)+
+  labs(fill = "",
+       title = "Number of fish species by family. Color represents taxonomic order")+
+  scale_fill_manual(values = paletteer_d("ggsci::default_igv"))
 ```
 
-### Row
+### Row {height="50%"}
 
 ```{r eval = TRUE, include = T}
-exp_meta$fish |> 
-  distinct(location, ps_station_id, date, local_time, lat, lon, exposure, habitat, team_lead) |> 
-  gt::gt(rowname_col = "location") |> 
-  gt::tab_header(title = "Fish survey locations") |> 
-  gt::opt_interactive(use_compact_mode = T)
+refs <- tibble(location = c("Niue", "Flint", "Beveridge","Millenium", "Vostok"), 
+               gr_m2 = c(80, 240, 270, 315, 412))
+
+summary_by_trophic <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location)) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic)) |> 
+  group_by(location, ps_station_id, depth_strata, trophic) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), sum, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(location, depth_strata, trophic) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
+  ungroup() |> 
+  #filter(location %in% c("Bikar", "Bokak")) |> 
+  group_by(location) |> 
+  mutate(pct_biomass = 100*gr_m2/sum(gr_m2)) |> 
+  arrange(location, pct_biomass) |> 
+  mutate(location = paste(location, depth_strata, sep = "\n"),
+         trophic = factor(trophic)) 
+
+tmp <- summary_by_trophic |> 
+  bind_rows(refs) |> 
+  ggplot()+
+  geom_col(aes(fct_reorder(location, gr_m2, sum, na.rm = T), y = gr_m2), fill = "grey")+
+  geom_col(data = summary_by_trophic,
+           aes(location, y = gr_m2, fill = fct_reorder(trophic, gr_m2)))+
+  labs(x = "", y = "Average fish biomass (g/m2)", fill ="") 
+
+ggplotly(tmp)
 ```
 
 # Benthic Surveys
 
-```{r  eval = TRUE}
+```{r eval = TRUE}
 benthic_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
                             layer = "benthos")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -355,7 +460,7 @@ benthic_meta_sf |>
                                                         "depth_m")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$benthos |> 
@@ -383,7 +488,7 @@ edna_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_
                             layer = "eDNA")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -471,7 +576,7 @@ edna_meta_sf |>
                                                         "depth_m")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$edna |> 
@@ -493,7 +598,7 @@ bruvs_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition
                             layer = "bruvs")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -577,7 +682,7 @@ bruvs_meta_sf |>
                                                         "depth_m")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$bruvs |> 
@@ -601,7 +706,7 @@ pelagics_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedit
                             layer = "pelagics")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -669,7 +774,7 @@ pelagics_meta_sf |>
                                                         "depth_m")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ### Row
 
@@ -686,7 +791,7 @@ dscm_meta_sf |>
   geom_sf(aes(col = depth_m))
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -770,7 +875,7 @@ dscm_meta_sf |>
                                                         "depth_m")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$dscm |> 
@@ -787,14 +892,14 @@ exp_meta$dscm |>
 
 ### Row
 
-# Sub 
+# Sub
 
 ```{r  eval = TRUE}
 sub_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
                             layer = "sub")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -890,7 +995,7 @@ sub_meta_sf |>
                                                         )))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$sub |> 
@@ -912,7 +1017,7 @@ birds_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition
                             layer = "birds")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -988,7 +1093,7 @@ birds_meta_sf |>
                                                         "vessel")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$birds |>
@@ -1010,7 +1115,7 @@ veg_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_m
                             layer = "vegetation")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -1065,7 +1170,7 @@ veg_meta_sf |>
                                                         "team_lead")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$vegetation |>
@@ -1086,7 +1191,7 @@ traverse_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedit
                             layer = "traverses")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -1128,7 +1233,7 @@ traverse_meta_sf |>
                                                         "team_lead")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$traverses |>
@@ -1149,7 +1254,7 @@ plastics_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedit
                             layer = "plastics")
 ```
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
@@ -1169,17 +1274,17 @@ plastics_meta_sf |>
                                                         "team_lead")))
 ```
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ### Row
 
 # Turtles
 
-## Column {width=70%}
+## Column {width="70%"}
 
 ### Column {.tabset}
 
-## Column {width=30%}
+## Column {width="30%"}
 
 ```{r eval = TRUE, include = T}
 exp_meta$turtles |> 
@@ -1191,4 +1296,3 @@ exp_meta$turtles |>
 ```
 
 ### Row
-

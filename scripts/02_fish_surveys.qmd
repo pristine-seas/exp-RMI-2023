@@ -1,0 +1,473 @@
+---
+title: "RMI 2023 expedition report"
+subtitle: "Fish Surveys"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+theme: cosmo
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10, echo = F}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+library(gt)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+ggthemr::ggthemr('light')
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+
+fish_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                              layer = "fish")
+
+fish_meta <- exp_meta$fish
+```
+
+```{r read}
+fish_obs <- readxl::read_xlsx(file.path(exp_path, "data/primary/raw/fish/RMI_2023_fish_fieldbook_AMF.xlsx"),
+                               sheet = "fish_obs")
+
+fish_codes <- readxl::read_xlsx(file.path(exp_path, "data/primary/raw/fish/RMI_2023_fish_fieldbook_AMF.xlsx"),
+                               sheet = "fish_codes") |> 
+  distinct(taxon_code, taxon_valid_name)
+
+fish_obs <- fish_obs |> 
+  left_join(fish_codes) 
+
+fish_taxa <- fish_obs |> 
+  distinct(taxon_code, taxon_valid_name)
+```
+
+```{r worms}
+taxonomy_worms <- fish_taxa$taxon_valid_name %>% 
+  split(ceiling(seq_along(fish_taxa$taxon_valid_name)/20)) %>% 
+  furrr::future_map_dfr(worrms::wm_records_names) %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(scientificname)) %>% 
+  mutate(rank = str_to_lower(rank),
+         taxon_id = if_else(!is.na(valid_aphia_id),
+                              paste0("WORMS:", valid_aphia_id),
+                              NA_character_)) %>% 
+  select(taxon_clean = scientificname, status, taxon_valid_name = valid_name, taxon_rank = rank, taxon_id, taxon_authority = valid_authority, kingdom, phylum, class, order, family, genus) %>% 
+  distinct()
+
+duped_taxa_worms <- taxonomy_worms %>% 
+  janitor::get_dupes(taxon_clean) 
+
+deduped_taxa_worms <- duped_taxa_worms %>% 
+  filter(status %in% c("accepted")) %>% 
+  select(-dupe_count)
+
+taxonomy_worms <- taxonomy_worms %>% 
+  group_by(taxon_clean) %>% 
+  filter(n() <= 1) %>% # remove duplicates
+  bind_rows(deduped_taxa_worms) # add deduped
+
+taxonomy_worms %>% 
+  filter(taxon_valid_name != taxon_clean)
+
+fish_taxa <- fish_taxa |> 
+  rename(taxon_clean = taxon_valid_name) |> 
+  left_join(taxonomy_worms)|> 
+  select(-taxon_clean)
+```
+
+```{r fishbase}
+fishbase_params <- fish_taxa %>% 
+  pull(taxon_valid_name) %>% 
+  split(ceiling(seq_along(fish_taxa$taxon_valid_name)/20)) %>% 
+  furrr::future_map_dfr(rfishbase::estimate) %>% 
+  janitor::clean_names() %>% 
+  select(fb_taxa_code = spec_code, species, max_length_tl, troph, se_troph, a, sd_log10a, b,
+         sd_b, method_ab, age_min, age_max, feeding_path) %>% 
+  distinct()
+
+fish_taxa <- fish_taxa |> 
+  left_join(fishbase_params, 
+            by = c("taxon_valid_name" = "species")) 
+
+fish_taxa |> 
+  filter(is.na(a))
+
+sio_file <- read_csv(file.path(ps_science_path, 
+                                  "expeditions", 
+                                  "SLI-2023", 
+                                  "data/primary/raw/fish/Pacific_Indian_LW_params_21Sept2021.csv")) |> 
+  janitor::clean_names() 
+
+fish_taxa <- fish_taxa |> 
+  filter(!is.na(a)) |> 
+  bind_rows(fish_taxa |> 
+              filter(is.na(a)) |> 
+              select(-a, -b, -max_length_tl) |> 
+              left_join(sio_file |> 
+                          select(taxon_code = new_name, a = a_cm, b = b_cm, max_length_tl = lmax_cm))) |> 
+  arrange(taxon_valid_name) 
+
+fish_taxa$method_ab[is.na(fish_taxa$method_ab)]  <- "SIO"
+```
+
+```{r trophic}
+fish_trophic_group <- read_csv(file.path(ps_science_path, 
+                                  "expeditions", 
+                                  "SLI-2023", 
+                                  "data/primary/raw/fish/Pacific_Indian_LW_params_21Sept2021.csv")) |> 
+  janitor::clean_names() |> 
+  distinct(taxon_valid_name = taxon, common_family, consumer, trophic, trophic_detailed)
+
+trophic_group_adds <- read_csv(file.path(exp_path,
+                                  "data/primary/raw/fish/missing_trophic_info_AMF.csv")) |> 
+  janitor::clean_names() |> 
+  distinct(taxon_valid_name, common_family, consumer, trophic, trophic_detailed)
+
+fish_trophic_group <- fish_trophic_group |> 
+  bind_rows(trophic_group_adds) 
+
+fish_trophic_group$consumer[fish_trophic_group$consumer == "Apex"] <- "Top-predator"
+
+fish_taxa <- fish_taxa |> 
+  left_join(fish_trophic_group) 
+
+fish_taxa |> 
+  filter(is.na(trophic))
+  
+fish_taxa |> 
+  group_by(consumer) |> 
+  summarize(n())
+# fish_taxa |> 
+#   filter(is.na(trophic)) |> 
+#   write_csv(file.path(exp_path, "data/primary/processed/missing_trophic_info.csv"))
+```
+
+```{r qa_qc}
+# fish_obs |> 
+#   left_join(fish_taxa |> 
+#               distinct(taxon_code, taxon_valid_name, max_length_tl)) |> 
+#   mutate(avg_length = (min_tl_cm + max_tl_cm)/2,
+#          diff = round(avg_length - max_length_tl)) |> 
+#   filter(avg_length > max_length_tl) |> 
+#   select(ps_site_id, depth_strata, transect, taxon_code, taxon_valid_name, n_ind, min_tl_cm, max_tl_cm, 
+#          max_length_tl, diff) |> 
+#   arrange(desc(diff)) 
+```
+
+```{r calc_biomass}
+biomass_by_obs <- fish_obs |> 
+  left_join(fish_taxa |> 
+              distinct(taxon_code, taxon_valid_name, max_length_tl, a, b)) |> 
+  mutate(avg_tl_cm = (min_tl_cm + max_tl_cm)/2,
+         avg_tl_cm = if_else(is.na(max_length_tl),
+                             avg_tl_cm,
+                             if_else(avg_tl_cm > max_length_tl, 
+                                     max_length_tl, 
+                                     avg_tl_cm))) |> 
+  select(-max_length_tl) |> 
+  mutate(biomass_gr = n_ind*a*(avg_tl_cm)^b,
+         ind_m2 = if_else(avg_tl_cm <= 20, n_ind/50, n_ind/100),
+         gr_m2 = if_else(avg_tl_cm <= 20, biomass_gr/50, biomass_gr/100),
+         ps_station_id = str_replace(ps_site_id, "RMI_UVS", "RMI_2023_fish")) |> 
+  select(ps_station_id, depth_strata, depth_m, diver, transect, taxon_valid_name, avg_tl_cm, n_ind, ind_m2, biomass_gr, gr_m2) 
+```
+
+```{r add_zeros}
+biomass_by_transect_and_taxa <- biomass_by_obs |> 
+  group_by(ps_station_id, depth_strata, depth_m, transect, taxon_valid_name) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), sum, na.rm = T)) |> 
+  pivot_wider(names_from = taxon_valid_name, 
+              values_from = c(ind_m2, gr_m2), 
+              values_fill = 0, 
+              names_sep = "-") |> 
+  pivot_longer(cols = !c(ps_station_id, depth_strata, depth_m, transect),
+               names_to = c("variable","taxon_valid_name"), 
+               names_sep = "-",
+               values_to = "value") |> 
+  pivot_wider(names_from = variable, values_from = value) |> 
+  ungroup()
+```
+
+```{r summarize}
+biomass_by_strata_and_taxa <- biomass_by_transect_and_taxa |> 
+  group_by(ps_station_id, depth_strata, depth_m, taxon_valid_name) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
+  ungroup() 
+```
+
+```{r save}
+save(fish_taxa, biomass_by_obs, biomass_by_strata_and_taxa,
+     file = file.path(exp_path, "data/primary/output/fish_surveys.Rdata"))
+```
+
+# High level summary
+
+```{r}
+load(file = file.path(exp_path, "data/primary/output/fish_surveys.Rdata"))
+
+summary_by_strata <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location, exposure, habitat)) |> 
+  group_by(location, ps_station_id, depth_strata, depth_m, exposure, habitat) |> 
+  summarise(n_taxa = n_distinct(taxon_valid_name[ind_m2 > 0]),
+            across(c("ind_m2",  "gr_m2"), sum, na.rm = T)) |> 
+  ungroup()
+
+summary_by_taxa <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location)) |> 
+  group_by(location, taxon_valid_name) |>
+  summarise(frq = 100*sum(gr_m2 > 0)/n(),
+            across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
+  ungroup() |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic, family, class, order))
+```
+
+```{r}
+summary_by_taxa |> 
+  group_by(location) |>
+  summarise(total_richness = n_distinct(taxon_valid_name[gr_m2>0]),
+            n_fams = n_distinct(family[gr_m2>0]),
+            across(c("ind_m2",  "gr_m2"), 
+                   sum, na.rm = T)) |> 
+  left_join(summary_by_strata |> 
+              group_by(location) |>
+              summarise(n_stations = n_distinct(ps_station_id),
+                        across(c("n_taxa"), 
+                               mean, na.rm = T))) |> 
+  select(location, n_stations, total_richness, n_fams, n_taxa, ind_m2, gr_m2)
+```
+
+# Depth effect 
+
+```{r}
+(depth_plot <- summary_by_strata |> 
+  dplyr::filter(location %in% c("Bikar", "Bokak")) |> 
+  ggstatsplot::grouped_ggbetweenstats(x     = depth_strata,
+                                      y     = gr_m2,
+                                      grouping.var = location,
+                                      ggsignif.args    = list(textsize = 4, tip_length = 0.01),
+                                      p.adjust.method  = "bonferroni",
+                                      palette          = "default_jama",
+                                      package          = "ggsci",
+                                      plotgrid.args    = list(nrow = 1)))
+
+ggsave(depth_plot, filename = file.path(exp_path, "figures/fish_biomass_violin_by_location.png"), width = 10)
+```
+
+```{r}
+# summary_by_strata |> 
+#   left_join(fish_meta |> distinct(location, ps_station_id)) |> 
+#   group_by(location, depth_strata) |> 
+#   summarize(across(c("n_taxa", "ind_m2" ,  "gr_m2"), list(avg = mean,sd = sd), na.rm = T)) |> 
+#   ungroup() |> 
+#   filter(location %in% c("Bikar", "Bokak")) |> 
+#   mutate_if(is.numeric, round, 1) |> 
+#   transmute(location, depth_strata, n_taxa = paste(n_taxa_avg, " (",n_taxa_sd, ")", sep = ""),
+#             ind_m2 = paste(ind_m2_avg, " (",ind_m2_sd, ")", sep = ""),
+#             gr_m2 = paste(gr_m2_avg, " (",gr_m2_sd, ")", sep = "")) |> 
+#   dplyr::group_by(location) 
+#   gt() |> 
+#   cols_label(n_taxa ~ "# Taxa",
+#              ind_m2 ~ "Abundance (ind/m2)",
+#              gr_m2 ~ "Biomass (g/m2)",
+#              depth_strata ~ "Depth strata") |> 
+#   tab_footnote("Standard deviations shown in parenthesis") 
+  # gt::gtsave(file.path(exp_path, "reports/Bikar and Bokak/tbls/fish_biomass.docx"))
+```
+
+```{r}
+transect_adonis <- vegan::adonis2(summary_by_strata %>% 
+                                    filter(location %in% c("Bikar", "Bokak")) |> 
+                                    select(gr_m2) ~  location + depth_strata + exposure + habitat, 
+                                  data = summary_by_strata |> 
+                                    filter(location %in% c("Bikar", "Bokak")) ,
+                                  #strata = summary_by_strata$location,
+                                  permutations = 1000,
+                                  by = "margin",
+                                  method = "euclidean")
+
+broom::tidy(transect_adonis) %>% 
+  mutate_if(is.numeric, round, 3) 
+```
+
+*At the aggregate level, there does not seem to be significant differences in fish biomass, richness, or abundance by depth strata* That said, for Bikini and Rongerik, fish biomass is considerably highers in the deeper areas. Not the same can be said in Bikar and Bokak. 
+
+# Taxa
+
+```{r}
+(fish_taxatreemap <- summary_by_taxa |> 
+  filter(location %in% c("Bikar", "Bokak")) |> 
+  group_by(order, family, common_family) |> 
+  summarize(n_taxa = n_distinct(taxon_valid_name[frq > 0]),
+            across(c("ind_m2", "gr_m2"), 
+                   sum, na.rm = T)) |> 
+  filter(n_taxa > 0) |> 
+  ungroup() |> 
+  ggplot(aes(area = n_taxa, 
+             label = paste(family, n_taxa, sep = "\n"),
+             fill = order,
+             subgroup = order)) +
+  treemapify::geom_treemap(show.legend = F)+
+  treemapify::geom_treemap_text(colour = "black", place = "middle", reflow = T, min.size = 3)+
+  labs(fill = "",
+       title = "Number of fish species by family. Color represents taxonomic order")+
+  scale_fill_manual(values = paletteer_d("ggsci::default_igv")))
+
+ggsave(fish_taxatreemap,
+       filename = file.path(exp_path, "figures/fish_taxatreemap.png"), width = 10)
+```
+
+## Top taxa
+
+```{r}
+summary_by_taxa |> 
+  group_by(location) |> 
+  slice_max(n = 10, gr_m2) |> 
+  select(location, trophic, common_family, everything(), - order, -family, -class)
+```
+
+## Differences by island
+
+```{r}
+bikar_sp <- unique(summary_by_taxa$taxon_valid_name[summary_by_taxa$location == "Bikar" & 
+                                                      summary_by_taxa$gr_m2 > 0])
+
+bokak_sp <- unique(summary_by_taxa$taxon_valid_name[summary_by_taxa$location == "Bokak" & 
+                                                      summary_by_taxa$gr_m2 > 0])
+
+tmp_ls <- list(bikar = bikar_sp, bokak = bokak_sp)
+
+ggVennDiagram::ggVennDiagram(x = tmp_ls,
+                             lwd = 0.8, category.names = names(tmp_ls))+
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF")+
+   theme(legend.position = "none")
+```
+```{r}
+taxa_diffs <- summary_by_taxa |> 
+  filter(location %in% c("Bikar", "Bokak")) |> 
+  select(location, taxon_valid_name, gr_m2) |> 
+  pivot_wider(names_from = location, values_from = gr_m2) |> 
+  mutate(gap = abs(Bokak - Bikar)) |> 
+  group_by(taxon_valid_name) %>% 
+  mutate(max = max(Bokak, Bikar)) %>% 
+  ungroup() |> 
+  mutate(taxon_valid_name=forcats::fct_reorder(taxon_valid_name, abs(gap)))
+
+taxa_diffs |> 
+  filter(Bikar == 0 | Bokak == 0) |> 
+  arrange(desc(gap))
+```
+
+```{r}
+taxa_diffs_long <- taxa_diffs |> 
+  filter(Bikar == 0 | Bokak == 0) |> 
+  pivot_longer(c(Bikar, Bokak)) |> 
+  slice_max(n = 60, gap) 
+
+diff_plot <- taxa_diffs_long |> 
+  ggplot(aes(x = value, y = taxon_valid_name)) +
+  geom_line(aes(group = taxon_valid_name), color="#E7E7E7", linewidth=3.5) +
+  geom_point(aes(color = name), size = 3) +
+  geom_text(aes(label=round(value, 1), color=name),
+            size=3.25,
+            nudge_x=if_else(
+              taxa_diffs_long$value==taxa_diffs_long$max, # if it's the larger value...
+              0.1,   # move it to the right of the point
+              -0.1), # otherwise, move it to the left of the point
+            hjust=if_else(
+              taxa_diffs_long$value==taxa_diffs_long$max, #if it's the larger value
+              0, # left justify
+              1),# otherwise, right justify      
+            ) +
+  geom_text(aes(label=name, color=name), 
+            data=. %>% filter(gap==max(gap)),
+            nudge_y =.5, 
+            fontface="bold",
+            size=3.25)+  
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(color="black"),
+        axis.text.x = element_text(color="#989898"),
+        axis.title = element_blank(),
+        panel.grid = element_blank()
+        ) +
+  labs(x="Biomass (g/m2)",y=NULL, title = "Fish species with largest differences in biomass between Bikar and Bokak") +
+  scale_color_manual(values=c("#436685", "#BF2F24"))
+
+ggsave(diff_plot,
+       filename = file.path(exp_path, "figures/fish_biomass_comparison_between_islands.png"), width = 10)
+```
+
+# Trophic
+
+```{r}
+refs <- tibble(location = c("Niue", "Flint", "Beveridge","Millenium", "Vostok"), 
+               gr_m2 = c(80, 240, 270, 315, 412))
+
+summary_by_trophic <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location)) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic)) |> 
+  group_by(location, ps_station_id, depth_strata, trophic) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), sum, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(location, depth_strata, trophic) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
+  ungroup() |> 
+  filter(location %in% c("Bikar", "Bokak")) |> 
+  group_by(location) |> 
+  mutate(pct_biomass = 100*gr_m2/sum(gr_m2)) |> 
+  arrange(location, pct_biomass) |> 
+  mutate(location = paste(location, depth_strata, sep = "\n"),
+         trophic = factor(trophic)) 
+
+summary_by_trophic |> 
+  bind_rows(refs) |> 
+  ggplot()+
+  geom_col(aes(fct_reorder(location, gr_m2, sum, na.rm = T), y = gr_m2), fill = "grey")+
+  geom_col(data = summary_by_trophic,
+           aes(location, y = gr_m2, fill = fct_reorder(trophic, gr_m2)))+
+  labs(x = "", y = "Average fish biomass (g/m2)", fill ="") 
+
+ggsave(file.path(exp_path, "figures/fish_biomass.png"), width = 10)
+```
+
+```{r}
+summary_by_trophic_family <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location)) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic)) |> 
+  group_by(location, ps_station_id, depth_strata, common_family, trophic) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), sum, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(location, common_family, trophic) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
+  ungroup() |> 
+  filter(location %in% c("Bikar", "Bokak")) |> 
+  group_by(location) |> 
+  mutate(pct = 100*gr_m2/sum(gr_m2)) |> 
+  ungroup()
+  
+tst <- summary_by_trophic_family |> 
+  slice_max(n = 30, gr_m2) |> 
+  group_by(location) |> 
+  arrange(location, pct) |> 
+  ggplot(aes(fct_reorder(common_family,gr_m2, sum), y = gr_m2, fill = trophic))+
+  geom_col()+
+  coord_polar()+
+  facet_wrap("location")+
+  labs(x = "")
+
+ggsave(tst, filename = file.path(exp_path, "figures/test_fish_biomass_by_family.png"), width = 10)
+```
+
+
