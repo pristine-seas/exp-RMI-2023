@@ -412,8 +412,15 @@ ggsave(diff_plot,
 # Trophic
 
 ```{r}
+biomass_ref_pts <- read_csv(file.path(ps_data_path, "Coral reef reference points/Pacific_fish_biomass_ref_pts.csv")) |> 
+  janitor::clean_names() |> 
+  mutate(region = str_to_sentence(region)) |> 
+  rename(gr_m2 = total_biomass_g_m_2)
+
 refs <- tibble(location = c("Niue", "Flint", "Beveridge","Millenium", "Vostok"), 
                gr_m2 = c(80, 240, 270, 315, 412))
+
+
 
 summary_by_trophic <- biomass_by_strata_and_taxa |> 
   left_join(fish_meta |> distinct(ps_station_id, location)) |> 
@@ -428,18 +435,20 @@ summary_by_trophic <- biomass_by_strata_and_taxa |>
   group_by(location) |> 
   mutate(pct_biomass = 100*gr_m2/sum(gr_m2)) |> 
   arrange(location, pct_biomass) |> 
-  mutate(location = paste(location, depth_strata, sep = "\n"),
+  mutate(location = paste(location, depth_strata, sep = "-"),
          trophic = factor(trophic)) 
 
-summary_by_trophic |> 
-  bind_rows(refs) |> 
+tmp <- summary_by_trophic |> 
+  bind_rows(biomass_ref_pts |> 
+              bind_rows(refs)) |> 
   ggplot()+
   geom_col(aes(fct_reorder(location, gr_m2, sum, na.rm = T), y = gr_m2), fill = "grey")+
   geom_col(data = summary_by_trophic,
            aes(location, y = gr_m2, fill = fct_reorder(trophic, gr_m2)))+
-  labs(x = "", y = "Average fish biomass (g/m2)", fill ="") 
+  labs(x = "", y = "Average fish biomass (g/m2)", fill ="") +
+  coord_flip()
 
-ggsave(file.path(exp_path, "figures/fish_biomass.png"), width = 10)
+ggsave(tmp, filename = file.path(exp_path, "figures/fish_biomass.png"), height = 15)
 ```
 
 ```{r}

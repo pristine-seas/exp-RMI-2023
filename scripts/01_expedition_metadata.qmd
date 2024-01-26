@@ -112,8 +112,8 @@ benthos_meta <-  bind_rows(benthos_molly, benthos_kike) |>
   group_by(site_number) |> 
   mutate(ps_station_id = paste("RMI_2023_benthos",
                                formatC(cur_group_id(), 
-                                       width = 2, 
-                                       flag = 0),
+                                        flag = 0,
+                                       width = 2),
                                sep = "_")) |> 
   ungroup() |> 
   group_by(site_number, depth_strata) |> 

@@ -1,0 +1,544 @@
+---
+title: "RMI 2023 expedition report"
+subtitle: "Benthic Surveys"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+theme: cosmo
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10, echo = F}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+library(gt)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+ggthemr::ggthemr('light')
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+
+benthos_meta_sf <- sf::st_read(file.path(exp_path, "data/primary/output/expedition_metadata.gpkg"), 
+                              layer = "benthos")
+
+benthos_meta <- exp_meta$benthos
+```
+
+# Clean data 
+
+## Read LPI data
+
+```{r }
+obs_kike <- readxl::read_xlsx(file.path(exp_path,
+                                       "data/primary/raw/benthos/MARSHALLS_Transsects-rough_kike.xlsx"),
+                             skip = 4, 
+                             col_names = F, 
+                             range = "C5:QF85") %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(x1), x1 != "TOTAL") %>% 
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble()
+
+transects_kike <- readxl::read_xlsx(file.path(exp_path,
+                            "data/primary/raw/benthos/MARSHALLS_Transsects-rough_kike.xlsx"),
+                  n_max = 2, 
+                  col_names = FALSE) %>%
+  janitor::clean_names() %>%
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble() |> 
+  remove_rownames() %>% 
+  janitor::clean_names() |> 
+  set_names(c("site_number", "depth_m")) |> 
+  mutate(team_lead = "Kike Ballesteros") |> 
+  select(site_number, depth_m, team_lead)
+
+pc_data_kike <- transects_kike |> 
+  cbind(obs_kike) 
+
+transects_molly <- readxl::read_xlsx(file.path(exp_path,
+                            "data/primary/raw/benthos/RMI_LPI_Molly.xlsx"),
+                  n_max = 2, 
+                  col_names = FALSE) %>%
+  janitor::clean_names() %>%
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble() |> 
+  remove_rownames() %>% 
+  janitor::clean_names() |> 
+  set_names(c("site_number", "depth_m")) |> 
+  mutate(team_lead = "Molly Timmers") |> 
+  select(site_number, depth_m, team_lead)
+
+obs_molly <- readxl::read_xlsx(file.path(exp_path,
+                                       "data/primary/raw/benthos/RMI_LPI_Molly.xlsx"),
+                             skip = 4, 
+                             col_names = F, 
+                             range = "A5:DG48") %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(x1), x1 != "TOTAL") %>% 
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble()
+
+pc_data_molly <- transects_molly |> 
+  cbind(obs_molly) 
+
+pc_data <- pc_data_molly |> 
+  bind_rows(pc_data_kike)
+
+pc_data <- pc_data |> 
+  mutate(site_number = parse_number(site_number),
+         uvs_station_id = paste("RMI_2023_uvs",
+                                formatC(site_number,
+                                        width = 2, 
+                                        flag = 0), 
+                                sep = "_"),
+         depth_m = as.numeric(depth_m),
+         depth_strata = if_else(depth_m == 20, "Deep", "Shallow")) |> 
+  arrange(site_number) |> 
+  group_by(site_number) |> 
+  mutate(ps_station_id = paste("RMI_2023_benthos",
+                               formatC(cur_group_id(), 
+                                        flag = 0, width = 2),
+                               sep = "_")) |> 
+  ungroup() |> 
+  select(uvs_station_id, ps_station_id, depth_strata, depth_m, everything(), 
+         -site_number, -team_lead)
+```
+
+```{r}
+pc_data_long <- pc_data |>
+  pivot_longer(-c(ps_station_id, depth_strata, depth_m, uvs_station_id), 
+               names_to = "taxon", 
+               values_to = "pts") |>
+  mutate(pts = as.numeric(pts)) |>
+  replace_na(list(pts = 0)) |> 
+  group_by(uvs_station_id, ps_station_id, depth_strata, depth_m, taxon) %>% 
+  summarise(pts = sum(pts)) %>% 
+  ungroup()
+
+pc_transects <- pc_data_long |> 
+  group_by(uvs_station_id, ps_station_id, depth_strata, depth_m) |> 
+  summarize(coral_pts = sum(pts[taxon == "Hard coral"]))
+
+pc_data_long |> 
+  group_by(ps_station_id, depth_strata) |>
+  summarise(n_pts = sum(pts, na.rm = T)) 
+```
+
+```{r}
+pc_data_long |> 
+  group_by(ps_station_id, depth_strata) |> 
+  summarize(pct = 100*sum(pts[taxon == "Hard coral"])/sum(pts)) |> 
+  ungroup() |> 
+  left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+  group_by(location, depth_strata) |> 
+  summarize(avg_pct_cover = mean(pct))
+```
+
+## Merge corals
+
+```{r}
+corals <- readxl::read_xlsx(file.path(exp_path,
+                                       "data/primary/raw/benthos/RMI_Coral_Data.xlsx"),
+                             skip = 3, 
+                             col_names = F, 
+                             range = "A6:UJ59") %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(x1), x1 != "TOTAL") %>% 
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble()
+
+coral_transects <- readxl::read_xlsx(file.path(exp_path,
+                            "data/primary/raw/benthos/RMI_Coral_Data.xlsx"),
+                  n_max = 5, 
+                  col_names = FALSE) %>%
+  janitor::clean_names() %>%
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble() |> 
+  remove_rownames() %>% 
+  janitor::clean_names() |> 
+  mutate(site_number = parse_number(site),
+         uvs_station_id = paste("RMI_2023_uvs",
+                                formatC(site_number,
+                                        width = 2, 
+                                        flag = 0), 
+                                sep = "_"),
+         depth_m = as.numeric(depth),
+         depth_strata = if_else(depth_m == 20, "Deep", "Shallow")) |> 
+  select(uvs_station_id, depth_strata, depth_m) |> 
+  left_join(benthos_meta |> 
+              distinct(uvs_station_id, ps_station_id)) |> 
+  select(uvs_station_id, ps_station_id, everything())
+
+coral_data <- coral_transects |> 
+  cbind(corals)
+```
+
+```{r}
+coral_data_long <- coral_data |> 
+  ungroup() |> 
+  pivot_longer(-c(ps_station_id, uvs_station_id, depth_strata, depth_m), 
+               names_to = "taxon", 
+               values_to = "pts") |> 
+  mutate(pts = as.numeric(pts)) |> 
+  replace_na(list(pts = 0)) %>% 
+  group_by(uvs_station_id, ps_station_id, depth_strata, depth_m, taxon) %>% 
+  summarise(pts = sum(pts)) %>% 
+  ungroup()
+
+coral_transects <- coral_data_long |> 
+  group_by(uvs_station_id, ps_station_id, depth_strata, depth_m) |> 
+  summarize(coral_pts_molly = sum(pts))
+
+coral_factor <- pc_transects |> 
+  left_join(coral_transects) |> 
+  mutate(factor = if_else(coral_pts_molly == 0, 
+                          1,
+                          coral_pts/coral_pts_molly))
+```
+
+```{r qa/qc}
+pc_data_long |> 
+  distinct(uvs_station_id,ps_station_id, depth_strata, depth_m) |> 
+  anti_join(coral_data_long |> 
+              distinct(uvs_station_id, ps_station_id, depth_strata, depth_m))
+
+coral_data |> 
+  distinct(uvs_station_id,ps_station_id, depth_strata, depth_m) |> 
+  anti_join(pc_data |> 
+              distinct(uvs_station_id, ps_station_id, depth_strata, depth_m))
+```
+
+```{r}
+coral_data_long <- coral_data_long |> 
+  left_join(coral_factor |> 
+              select(ps_station_id, depth_strata, depth_m, factor)) |> 
+  mutate(pts = pts*factor) |> 
+  select(-factor)
+```
+
+```{r}
+lpi_data <- pc_data_long |> 
+  filter(taxon != "Hard coral") |>
+  bind_rows(coral_data_long) |> 
+  group_by(ps_station_id, depth_strata, depth_m) %>% 
+  mutate(p_cover = round(100*pts/sum(pts), 4)) %>% 
+  ungroup() 
+
+lpi_data |> 
+  group_by(ps_station_id, depth_strata,depth_m) |> 
+  summarize(sum(pts))
+```
+
+## Taxa list
+
+```{r}
+pc_taxa <- lpi_data |> 
+  ungroup() |> 
+  distinct(taxon) |> 
+  arrange(taxon)
+
+benthos_taxa <- bdc::bdc_clean_names(pc_taxa$taxon) %>% 
+  janitor::clean_names() %>% 
+  select(taxon = scientific_name, 
+         taxon_clean = names_clean) %>% 
+  mutate(taxon_clean = coalesce(taxon_clean, 
+                                taxadb::clean_names(taxon, lowercase = F))) %>% 
+  distinct(taxon, taxon_clean) |> 
+  mutate(taxon_clean = str_remove_all(taxon_clean,
+                                      "unidentified|grey|sandy|red|light|staghorn") |> 
+           str_squish() |> str_trim() )
+  
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon, "CCA unidentified")] <- "Corallinales"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon_clean, "sponge")] <- "Porifera"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon_clean, "Chalinula")] <- "Chalinula milnei"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon_clean, "Pseudoceratina")] <- "Pseudoceratina"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon, "barren")] <- "Barren"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon, "Halimeda taenicola mini")] <- "Halimeda taenicola"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon, "Cyano red")] <- "Cyanobacteria"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon, "Diademnid sp.")] <- "Diadematoida"
+benthos_taxa$taxon_clean[str_detect(benthos_taxa$taxon, "osiris")] <- "Haliclona (Reniera) osiris"
+benthos_taxa$taxon_clean[benthos_taxa$taxon == "Unknown scleractinian"] <- "Scleractinia"
+
+benthos_taxa |> 
+  filter(taxon != taxon_clean)
+```
+
+```{r gnr_benthos}
+algae_gnr <-  taxize::gnr_resolve(benthos_taxa$taxon_clean, 
+                      canonical = F,
+                      with_canonical_ranks = T,
+                      data_source_ids = c(195)) %>% # ALGAE BASE
+  filter(submitted_name != matched_name2) %>% 
+  distinct(submitted_name, score, taxon_gnr = matched_name2)
+
+algae_gnr <- algae_gnr |> filter(!str_detect(taxon_gnr, "bikinensis"))
+
+not_algae_gnr <- benthos_taxa %>% 
+  filter(!taxon_clean %in% algae_gnr$submitted_name) %>% 
+  pull(taxon_clean) %>% 
+  taxize::gnr_resolve(canonical = F,
+                      with_canonical_ranks = T,
+                      data_source_ids = c(9)) %>% # WORMS 
+  filter(submitted_name != matched_name2) %>% 
+  distinct(submitted_name, score, taxon_gnr = matched_name2) 
+
+not_algae_gnr <- not_algae_gnr |> 
+  filter(str_count(taxon_gnr, '\\w+') > 1) |>  # wrong species
+  filter(!str_detect(taxon_gnr, "Idotea"))
+
+benthos_taxa <- benthos_taxa %>% 
+  left_join(not_algae_gnr,
+            by = c("taxon_clean" = "submitted_name")) %>% 
+  mutate(taxon_gnr = coalesce(taxon_gnr, taxon_clean)) %>% 
+  select(-score) %>% 
+  left_join(algae_gnr %>% 
+              rename(taxon_gnr_algae = taxon_gnr),
+            by = c("taxon_clean" = "submitted_name")) %>% 
+  mutate(taxon_gnr = coalesce(taxon_gnr_algae, taxon_gnr)) %>% 
+  select(-score, -taxon_gnr_algae)  
+
+benthos_taxa |> filter(taxon_gnr != taxon_clean)
+benthos_taxa |> filter(is.na(taxon_gnr))
+```
+
+```{r taxonomy_benthos}
+taxonomy_worms <- benthos_taxa$taxon_gnr %>% 
+  furrr::future_map(purrr::safely(worrms::wm_records_names))
+  
+taxonomy_worms <- transpose(taxonomy_worms)[["result"]] %>% 
+  bind_rows() %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(scientificname)) %>% 
+  mutate(rank = str_to_lower(rank),
+         taxon_id = if_else(!is.na(valid_aphia_id),
+                              paste0("WORMS:", valid_aphia_id),
+                              NA_character_)) %>% 
+  select(taxon_gnr = scientificname, status, taxon_valid_name = valid_name, taxon_rank = rank, taxon_id, taxon_authority = valid_authority, kingdom, phylum, class, order, family, genus) %>% 
+  distinct() 
+
+duped_taxa_worms <- taxonomy_worms %>% 
+  janitor::get_dupes(taxon_gnr) 
+
+deduped_taxa_worms <- duped_taxa_worms %>% 
+  filter(status %in% c("accepted")) %>% 
+  select(-dupe_count)
+
+deduped_taxa_worms <- deduped_taxa_worms |> 
+  filter(class != "Copepoda", taxon_rank == "genus", order != "Fucales")
+
+taxonomy_worms <- taxonomy_worms %>% 
+  group_by(taxon_gnr) %>% 
+  filter(n() <= 1) %>% # remove duplicates
+  bind_rows(deduped_taxa_worms) # add deduped
+
+taxonomy_worms %>% 
+  filter(taxon_valid_name != taxon_gnr) 
+
+benthos_taxa <- benthos_taxa %>% 
+  left_join(taxonomy_worms) %>% 
+  select(-taxon_clean)
+
+benthos_taxa |> 
+  filter(is.na(class))
+```
+
+```{r}
+gambieriensis <- tibble(taxon_valid_name = "Lobophora gambieriensis", 
+                        kingdom = "Chromista", 
+                        phylum = "Ochrophyta",
+                        class = "Phaeophyceae",
+                        order = "Dictyotales",
+                        family = "Dictyotaceae",
+                        genus = "Lobophora")
+
+benthos_taxa <- benthos_taxa |> 
+  filter(taxon_gnr != "Lobophora gambieriensis") |> 
+  bind_rows(gambieriensis)
+
+benthos_taxa <- benthos_taxa |> 
+  mutate(taxon_valid_name = coalesce(taxon_valid_name, taxon_gnr)) 
+```
+
+```{r morph}
+benthic_classes <- read_csv(file.path(exp_path, "data/primary/raw/benthos/benthic_classes_MT.csv")) |> 
+  distinct(taxon, group)
+
+benthos_taxa <- benthos_taxa |> 
+  left_join(benthic_classes) |> 
+  mutate(group = case_when(is.na(group) & order == "Scleractinia" ~ "Hard corals",
+                           is.na(group) & genus == "Zoanthus" ~ "Other Invert",
+                           is.na(group) & genus %in% c("Heliopora", "Millepora") ~ "Hard corals",
+                           TRUE ~ group)) 
+```
+
+```{r}
+cover_by_strata_and_taxa <- lpi_data |> 
+  group_by(ps_station_id, depth_strata, depth_m, taxon) |> 
+  summarize(pts = sum(pts),
+            p_cover = sum(p_cover))
+
+cover_by_strata <- cover_by_strata_and_taxa |> 
+  left_join(benthos_taxa |> distinct(taxon, taxon_valid_name, group)) |> 
+  group_by(ps_station_id, depth_strata, depth_m, group) |> 
+  summarize(pts = sum(pts),
+            p_cover = sum(p_cover)) |> 
+  ungroup()
+
+cover_by_strata |> 
+  group_by(ps_station_id, depth_strata) |> 
+  summarise(sum(p_cover))
+```
+
+```{r}
+save(benthos_taxa, cover_by_strata_and_taxa, cover_by_strata,
+     file = file.path(exp_path, "data/primary/output/benthic_surveys.Rdata"))
+```
+
+# Exploratory Analysis
+
+```{r eval = T, include = T}
+load(file = file.path(exp_path, "data/primary/output/benthic_surveys.Rdata"))
+```
+
+```{r eval = T, include = T}
+cover_by_strata |> 
+  left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+  group_by(location, depth_strata, group) |> 
+  summarize(p_cover = mean(p_cover)) |> 
+  pivot_wider(names_from = group, values_from = p_cover) |> 
+  filter(location %in% c("Bikar", "Bokak"))
+```
+
+## Depth effects
+
+```{r eval = T, include = T}
+(depth_plot <- cover_by_strata |> 
+    filter(group == "Hard corals") |> 
+    left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+    dplyr::filter(location %in% c("Bikar", "Bokak")) |> 
+    ggstatsplot::grouped_ggbetweenstats(x     = depth_strata,
+                                        y     = p_cover,
+                                        grouping.var = location,
+                                        ggsignif.args    = list(textsize = 4, tip_length = 0.01),
+                                        p.adjust.method  = "bonferroni",
+                                        palette          = "default_jama",
+                                        package          = "ggsci",
+                                        bf.message = F,
+                                        plotgrid.args    = list(nrow = 1),
+                                        results.subtitle=F,
+                                        subtitle = "Hard corals"))
+
+(depth_plot <- cover_by_strata |> 
+    filter(group == "CCA") |> 
+    left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+    dplyr::filter(location %in% c("Bikar", "Bokak")) |> 
+    ggstatsplot::grouped_ggbetweenstats(x     = depth_strata,
+                                        y     = p_cover,
+                                        grouping.var = location,
+                                        ggsignif.args    = list(textsize = 4, tip_length = 0.01),
+                                        p.adjust.method  = "bonferroni",
+                                        palette          = "default_jama",
+                                        package          = "ggsci",
+                                        bf.message = F,
+                                        plotgrid.args    = list(nrow = 1),
+                                        results.subtitle=F,
+                                        subtitle = "CCA"))
+
+(depth_plot <- cover_by_strata |> 
+    filter(group == "Erect algae") |> 
+    left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+    dplyr::filter(location %in% c("Bikar", "Bokak")) |> 
+    ggstatsplot::grouped_ggbetweenstats(x     = depth_strata,
+                                        y     = p_cover,
+                                        grouping.var = location,
+                                        ggsignif.args    = list(textsize = 4, tip_length = 0.01),
+                                        p.adjust.method  = "bonferroni",
+                                        palette          = "default_jama",
+                                        package          = "ggsci",
+                                        bf.message = F,
+                                        plotgrid.args    = list(nrow = 1),
+                                        results.subtitle=F,
+                                        subtitle = "Erect Algae"))
+
+(depth_plot <- cover_by_strata |> 
+    filter(group == "Encrusting algae") |> 
+    left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+    dplyr::filter(location %in% c("Bikar", "Bokak")) |> 
+    ggstatsplot::grouped_ggbetweenstats(x     = depth_strata,
+                                        y     = p_cover,
+                                        grouping.var = location,
+                                        ggsignif.args    = list(textsize = 4, tip_length = 0.01),
+                                        p.adjust.method  = "bonferroni",
+                                        palette          = "default_jama",
+                                        package          = "ggsci",
+                                        bf.message = F,
+                                        plotgrid.args    = list(nrow = 1),
+                                        results.subtitle=F,
+                                        subtitle = "Encrusting Algae"))
+```
+
+## Hard coral cover 
+
+```{r eval = T, include = T}
+coral_cover_ref_pts <- read_csv(file.path(ps_data_path, "Coral reef reference points/Pacific_coral_cover_ref_pts.csv")) |> 
+  janitor::clean_names() |> 
+  mutate(region = str_to_sentence(region))
+
+tmp <- cover_by_strata |> 
+  filter(group == "Hard corals") |> 
+  left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+  group_by(location, depth_strata) |> 
+  summarize(p_cover = mean(p_cover)) |> 
+  ungroup() |> 
+  mutate(label = paste(location, depth_strata, sep = "\n")) |> 
+  select(location = label, p_cover) |> 
+  bind_rows(coral_cover_ref_pts |> 
+              distinct(location, region, p_cover = percent_cover)) |> 
+  replace_na(list(region = "RMI")) 
+
+cover_plot <- tmp |> 
+  ggplot()+
+  geom_col(aes(fct_reorder(location, p_cover), p_cover, fill = region))+
+  labs(x = "", y = "% Coral cover", fill = "")+
+  theme(legend.position = "bottom")
+
+ggsave(cover_plot, filename =file.path(exp_path, "figures/coral_cover.png"), width = 22)
+```
+
+```{r eval = T, include = T}
+generic_richness <- cover_by_strata_and_taxa |> 
+  left_join(benthos_taxa |> distinct(taxon, genus, group)) |> 
+  left_join(benthos_meta |> distinct(ps_station_id, location)) |> 
+  filter(!is.na(genus), group == "Hard corals") |> 
+  group_by(location, ps_station_id, depth_strata, depth_m) |> 
+  summarize(generic_richness  = n_distinct(genus[p_cover > 0]))
+
+generic_richness |> 
+  mutate(label = paste(location, depth_strata, sep = "\n")) |> 
+  group_by(label, depth_strata) |> 
+  summarize(generic_richness = mean(generic_richness)) |> 
+  ggplot()+
+  geom_col(aes(x = fct_reorder(label, generic_richness), y = generic_richness))+
+  labs(x = "")
+```
+
