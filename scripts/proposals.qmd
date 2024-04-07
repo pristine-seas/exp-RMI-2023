@@ -1,0 +1,398 @@
+---
+title: "Process secondary data"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+```
+
+
+# Bikar and Bokak MPA proposals
+
+```{r}
+buffer_12nm <- sf::st_read(file.path(exp_path, 
+                      "data/secondary/raw/eez_12nm/eez_12nm.shp"))
+
+box = c(xmin = 167.9965, ymin = 11.9301, xmax = 171.9825, ymax = 14.9932)
+
+buffer_12nm <- st_crop(buffer_12nm, box)
+
+plot(buffer_12nm)
+
+filled <- smoothr::fill_holes(buffer_12nm, threshold = 10000000000) 
+
+islands <- st_difference(filled, buffer_12nm) 
+
+plot(islands)
+```
+
+```{r}
+buffers_35nm <- islands |> 
+  st_cast("POLYGON") |> 
+  st_centroid() |> 
+  st_buffer(dist = (35)*1852) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands) |> 
+  mutate(proposal = "Buffers (35nm)") |> 
+  select(proposal)
+
+buffers_35nm |> 
+  st_area()/10^6
+
+proposal_35nm <- buffers_35nm |> 
+  vect() |> 
+  minRect()
+
+expanse(proposal_35nm)/10^6 # 55,000 km2
+
+terra::writeVector(proposal_35nm, file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_35nm.shp"), overwrite=TRUE)
+
+st_write(buffers_35nm, file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_buffers_35nm.shp"), overwrite=TRUE)
+```
+
+```{r}
+proposal_30nm <- islands |> 
+  st_cast("POLYGON") |> 
+  st_centroid() |> 
+  st_buffer(dist = (30)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands)|> 
+  vect() |> 
+  minRect()
+
+expanse(proposal_30nm)/10^6  #45,000 km2
+
+terra::writeVector(proposal_30nm, file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_30nm.shp"), overwrite=TRUE)
+```
+
+# GFW
+
+```{r ,eval = F}
+library(DBI)
+library(bigrquery)
+
+bq_auth_id <- bq_auth(email = "juanmayorga@ucsb.edu")
+```
+
+```{sql, eval = F}
+#standardSQL
+###########################################################
+# EXAMPLE QUERY: GRIDDED FISHING EFFORT AT 10th DEGREE
+# DESCRIPTION:
+# This query demonstrates how to produce a fishing effort
+# raster for a given date range.
+# The query includes the following steps:
+-- 1) Identify good segments and active non-noise fishing vessels
+-- 2) Get all activity by potential fishing vessel over a period of time
+--    and bin the data to desired resolution
+-- 3) Filter to best list of fishing vessels
+-- 4) Identify "fishing" positions and calculate fishing hours using
+--    night_loitering for squid jiggers, and nnet_score for all other vessels.
+-- 5) Calculate fishing hours and sum by grid
+-- NOTE: Validator estimate: 81.41; Actual: 13.88
+###########################################################
+--
+--
+WITH
+  ########################################
+  # This subquery identifies good segments
+  good_segments AS (
+  SELECT
+    seg_id
+  FROM
+    `world-fishing-827.pipe_production_v20201001.research_segs`
+  WHERE good_seg
+    AND NOT overlapping_and_short
+  ),
+  ####################################################################
+  # Get the list of active fishing vessels that pass the noise filters
+  fishing_vessels AS (
+  SELECT
+    ssvid,
+    best_vessel_class,
+    year
+  FROM `world-fishing-827.gfw_research.fishing_vessels_ssvid_v20240101`
+  ),
+  #####################################################################
+  # This subquery gets all fishing in January, 2020.
+  # It queries the pipe_vYYYYMMDD_fishing table, which includes only likely
+  # fishing vessels. However, the table also includes noisy vessels. Thus, we use the
+  # more refined list of fishing vessels from the above subquery
+  fishing AS (
+  SELECT
+    ssvid,
+    /*
+    Assign lat/lon bins at desired resolution (here 10th degree)
+    FLOOR takes the smallest integer after converting to units of
+    0.1 degree - e.g. 37.42 becomes 374 10th degree units
+    */
+    FLOOR(lat * 10) as lat_bin,
+    FLOOR(lon * 10) as lon_bin,
+    EXTRACT(year FROM _partitiontime) as year,
+    hours,
+    nnet_score,
+    night_loitering,
+    eez
+  FROM `world-fishing-827.pipe_production_v20201001.research_messages`
+  LEFT JOIN UNNEST(regions.eez) AS eez
+  # Restrict query to single month
+  WHERE _partitiontime BETWEEN "2019-01-01" AND '2024-01-02'
+  # Use good_segments subquery to only include positions from good segments
+  AND is_fishing_vessel
+  AND seg_id IN (
+    SELECT
+      seg_id
+    FROM
+      good_segments)
+      AND eez = '8318'
+  ),
+  ########################################################################
+  # Filter fishing to just the list of active fishing vessels in that year
+  # Create fishing_score attribute using night_loitering instead of nnet_score
+  # for squid jiggers
+  fishing_filtered AS (
+  SELECT
+    *,
+    IF(best_vessel_class = 'squid_jigger',
+       night_loitering,
+       nnet_score) as fishing_score
+  FROM fishing
+  # Join on the fishing vessels list to filter out other vessels
+  JOIN fishing_vessels
+  USING(ssvid, year)
+  ),
+  ########################################################################
+  # Calculate fishing hours using combined fishing score metric
+  fishing_hours_filtered AS (
+  SELECT
+    *,
+    IF(fishing_score > 0.5, hours, NULL) as fishing_hours
+  FROM fishing_filtered
+  ),
+  #####################################################################
+  # This subquery sums fishing hours and converts coordinates back to
+  # decimal degrees
+  fishing_binned AS (
+  SELECT
+    /*
+    Convert lat/lon bins to units of degrees from 10th of degrees.
+    374 now becomes 37.4 instead of the original 37.42
+    */
+    year, 
+    best_vessel_class,
+    eez, 
+    lat_bin / 10 as lat_bin,
+    lon_bin / 10 as lon_bin,
+    SUM(hours) as hours,
+    SUM(fishing_hours) as fishing_hours
+  FROM fishing_hours_filtered
+  GROUP BY year, best_vessel_class, eez, lat_bin, lon_bin
+  )
+  #####################################################################
+  # Return fishing data and calculate fishing hours per square kilometer
+  SELECT
+    *
+  FROM fishing_binned
+```
+
+```{r}
+gfw_effort <- read_csv(file.path(exp_path, 
+                      "data/primary/processed/binned_GFW_effort_10th.csv"))
+
+gfw_effort |> 
+  group_by(best_vessel_class, lat_bin, lon_bin) |> 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T)) |> 
+  ggplot()+
+  geom_raster(aes(lon_bin, lat_bin, fill = fishing_hours))+
+  facet_wrap("best_vessel_class", scales = "free")
+```
+
+```{r}
+tbl_buffers35 <- gfw_effort |> 
+  st_as_sf(coords = c("lon_bin", "lat_bin"), crs = 4326) |> 
+  sf::st_join(buffers_35nm) |> 
+  st_drop_geometry() |> 
+  group_by(year, best_vessel_class, proposal) |> 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(year, best_vessel_class) |> 
+  mutate(proportion = 100*fishing_hours/sum(fishing_hours, na.rm = T)) |> 
+  ungroup() |> 
+  filter(!is.na(proposal), !best_vessel_class %in% c("fishing", "squid_jigger", "set_longlines")) |> 
+  select(year, proposal, best_vessel_class, proportion) 
+
+
+tbl_proposal35 <- gfw_effort |> 
+  st_as_sf(coords = c("lon_bin", "lat_bin"), crs = 4326) |> 
+  sf::st_join(st_as_sf(proposal_35nm) |> 
+                mutate(proposal = "Rectangle (35 nm)")) |> 
+  st_drop_geometry()  |> 
+  group_by(year, best_vessel_class, proposal) |> 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(year, best_vessel_class) |> 
+  mutate(proportion = 100*fishing_hours/sum(fishing_hours, na.rm = T)) |> 
+  ungroup() |> 
+  filter(!is.na(proposal), !best_vessel_class %in% c("fishing", "squid_jigger", "set_longlines")) |> 
+  select(year, proposal, best_vessel_class, proportion) 
+
+tbl_proposal30 <- gfw_effort |> 
+  st_as_sf(coords = c("lon_bin", "lat_bin"), crs = 4326) |> 
+  sf::st_join(st_as_sf(proposal_30nm) |> 
+                mutate(proposal = "Rectangle (30 nm)")) |> 
+  st_drop_geometry()  |> 
+  group_by(year, best_vessel_class, proposal) |> 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(year, best_vessel_class) |> 
+  mutate(proportion = 100*fishing_hours/sum(fishing_hours, na.rm = T)) |> 
+  ungroup() |> 
+  filter(!is.na(proposal), !best_vessel_class %in% c("fishing", "squid_jigger", "set_longlines")) |> 
+  select(year, proposal, best_vessel_class, proportion)
+
+
+bind_rows(tbl_proposal30, tbl_proposal35, tbl_buffers35) |> 
+  mutate_if(is.numeric, round, 2) |> 
+  pivot_wider(names_from = best_vessel_class, values_from = proportion, values_fill = 0) |> 
+  pivot_wider(names_from = proposal, 
+                          values_from = c(drifting_longlines, pole_and_line, tuna_purse_seines),
+                          names_glue = "{proposal}.{.value}") |> 
+  select(year, contains("buffer_35"), contains("rectangle_30"), contains("rectangle_35")) |> 
+  gt::gt(rowname_col = "year") |> 
+  gt::tab_spanner_delim(delim = ".") |> 
+    gt::cols_label(
+    year = "Year",
+    drifting_longlines = "Longline",
+    pole_and_line = "Pole and line",
+    tuna_purse_seines = "Purse seine"
+  ) |> 
+  gt::tab_header(title = "Proportion of total fishing effort within proposed MPA boundaries") |> 
+  gt::gtsave(file.path(exp_path, "reports/Bikar and Bokak/proposals.docx"))
+
+
+
+final_tbl <- bind_rows(tbl_proposal30, tbl_proposal35, tbl_buffers35) |> 
+  mutate_if(is.numeric, round, 2) |> 
+  pivot_wider(names_from = best_vessel_class, values_from = proportion) |> 
+  gt::gt(groupname_col = "proposal", rowname_col = "year") |> 
+  gt::cols_label(
+    year = "Year",
+    drifting_longlines = "Longline",
+    pole_and_line = "Pole and line",
+    tuna_purse_seines = "Purse seine"
+  ) 
+
+gt::gtsave(final_tbl, file.path(exp_path, "reports/Bikar and Bokak/proposals.docx"))
+```
+
+```{r}
+gfw_effort |> 
+  filter(!best_vessel_class %in% c("fishing", "squid_jigger", "set_longlines")) |> 
+  group_by(lon_bin, lat_bin) |> 
+  summarize(fishing_hours = sum(fishing_hours, na.rm = T)) |> 
+  filter(fishing_hours > 0.1) |> 
+  tidyterra::as_spatraster(crs = "EPSG:4326") |> 
+  terra::writeRaster(file.path(exp_path, 
+                      "data/primary/processed/proposals/gfw_raster.tif"), overwrite = T)
+```
+
+```{r}
+proposal_35nm <- sf::st_read(file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_35nm.shp")) |> 
+  mutate(proposal = "Connecting rectangle (35nm)")
+
+proposal_30nm <- sf::st_read(file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_30nm.shp"))|> 
+  mutate(proposal = "Connecting rectangle (30nm)")
+
+proposal_buffers_35nm <- sf::st_read(file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_buffers_35nm.shp")) 
+
+proposal_buffers_35nm$proposal[1] <- "Buffer (35 nm) - Bikar"
+proposal_buffers_35nm$proposal[2] <- "Buffer (35 nm) - Bokak"
+
+bikar_buffer_35nm <- proposal_buffers_35nm[1,] |> 
+  vect() |> 
+  minRect() |> 
+  st_as_sf()
+
+bokak_buffer_35nm <- proposal_buffers_35nm[2,] |> 
+  vect() |> 
+  minRect() |> 
+  st_as_sf()
+
+square_buffers <- st_as_sf(bokak_buffer_35nm) |> 
+  mutate(proposal = "Square buffer (35 nm) - Bokak") |> 
+  bind_rows(st_as_sf(bikar_buffer_35nm) |> 
+              mutate(proposal = "Square buffer (35 nm) - Bikak")) 
+  
+
+coords_proposal_35nm <- sf::st_coordinates(proposal_35nm) |> 
+  as_tibble() |> 
+  mutate(proposal = "Connecting rectangle (35nm)") 
+
+coords_proposal_30nm <- sf::st_coordinates(proposal_30nm) |> 
+  as_tibble() |> 
+  mutate(proposal = "Connecting rectangle (350nm)") 
+
+coords_proposal_buffer_bokak <- sf::st_coordinates(bokak_buffer_35nm) |> 
+  as_tibble() |> 
+  mutate(proposal = "Square buffer (35 nm) - Bokak") 
+
+coords_proposal_buffer_bikar <- sf::st_coordinates(bikar_buffer_35nm) |> 
+  as_tibble() |> 
+  mutate(proposal = "Square buffer (35 nm) - Bikar")
+
+tbl <- bind_rows(coords_proposal_buffer_bikar, 
+          coords_proposal_buffer_bokak,
+          coords_proposal_30nm,
+          coords_proposal_35nm) |> 
+  select(proposal, lon = X, lat = Y) |> 
+  gt::gt()
+  
+gt::gtsave(tbl,
+           filename  = file.path(exp_path, "data/primary/processed/proposals/proposals_coords.docx"))
+```
+
+```{r}
+bikar_bokak_proposals <- square_buffers |> 
+  bind_rows(proposal_30nm) |> 
+  bind_rows(proposal_35nm) |> 
+  bind_rows(proposal_buffers_35nm |> select(proposal)) |> 
+  select(-FID)
+
+bikar_bokak_proposals <- bikar_bokak_proposals |> 
+  mutate(area_km2 = round(as.numeric(st_area(geometry)/10^6))) |> 
+  select(proposal, area_km2)
+
+sf::st_write(bikar_bokak_proposals, file.path(exp_path, "data/primary/processed/proposals/all_proposals.gpkg"))
+
+bikar_bokak_proposals |> 
+  ggplot()+
+  geom_sf(aes(col = proposal), fill = "NA")
+```
+

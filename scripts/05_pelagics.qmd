@@ -1,0 +1,120 @@
+---
+title: "RMI 2023 expedition report"
+subtitle: "Pelagic cameras"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+theme: cosmo
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10, echo = F}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+library(gt)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+ggthemr::ggthemr('fresh')
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+
+pelagics_meta <- exp_meta$pelagics |> 
+  filter(location %in% c("Bikar", "Bokak")) 
+```
+
+```{r}
+maxN_data <- readxl::read_xlsx(file.path(exp_path, 
+                                         "data/primary/processed/pelagics",
+                                         "Marshall_Islands_202309_AllData_Midwaters_2024_02_01.xlsx"),
+                               sheet = "MaxN") %>% 
+  janitor::clean_names() |> 
+  select(op_code, binomial, max_n)
+
+maxN_data$op_code <- str_replace(maxN_data$op_code, "RMIP23_", "RIM_pcam_")
+
+maxN_data <- maxN_data |> 
+  inner_join(pelagics_meta |> 
+              select(op_code = opcode, location, ps_station_id)) |> 
+  select(location, ps_station_id, everything())
+
+maxN_data <- maxN_data |> 
+  pivot_wider(names_from = binomial, values_from = max_n, values_fill = 0) |> 
+  pivot_longer(!c(location, ps_station_id, op_code), names_to = "taxon", values_to = "maxN")
+```
+
+```{r}
+n_by_island <- pelagics_meta |> 
+  group_by(location) |> 
+  summarize(n_deployments = n_distinct(ps_station_id))
+
+maxN_summary <- maxN_data |> 
+  group_by(location, ps_station_id, taxon) |> 
+  summarize(maxN = max(maxN)) |> 
+  ungroup() |> 
+  group_by(location, taxon) |> 
+  summarise(avg_maxN = round(mean(maxN), 2),
+            max_maxN = round(max(maxN), 2),
+            n_stations = n_distinct(ps_station_id[maxN > 0])) |> 
+  left_join(n_by_island) |> 
+  mutate(freq_obs = round(100*n_stations/n_deployments)) |> 
+  select(-n_stations, -n_deployments) |> 
+  ungroup() |> 
+  arrange(desc(avg_maxN))
+
+maxN_summary |> 
+  filter(!str_detect(taxon , "Aspidontus|Ctenophora|Fistularia|Remora|Salpidae|Juvenile|Cubozoa|Crustacea|naucrates")) |> 
+  filter(avg_maxN >0) |> 
+  group_by(location) |> 
+  #slice_max(n = 10, avg_maxN, with_ties = F) |> 
+  gt::gt(rowname_col = "taxon") |> 
+  gt::cols_label(avg_maxN = "Mean maxN",
+                 max_maxN = "Max maxN",
+                 freq_obs = "Frequency of observation (%)") |> 
+  gt::gtsave(file.path(exp_path, "reports/Bikar and Bokak/tbls/pelagics_summary.docx"))
+
+common_names <- read_csv("common_names.csv")
+```
+
+```{r}
+pelagics_plot <- maxN_summary |> 
+  filter(!str_detect(taxon , "Aspidontus|Ctenophora|Fistularia|Remora|Salpidae|Juvenile|Cubozoa|Crustacea|naucrates")) |> 
+  left_join(common_names) |> 
+  mutate(label = paste(common_name, paste0("(",taxon, ")"), sep = "\n")) |> 
+  ggplot()+
+  geom_col(aes(x = fct_reorder(label, avg_maxN), avg_maxN, fill = location), position = "dodge")+
+  coord_flip() +
+  labs(x = "", y = "Average maxN", fill = "")+
+  scale_y_continuous(expand = c(0,0))+
+  scale_fill_manual(values = c("yellow2", "dodgerblue"))+
+  ggthemes::theme_clean()+
+  theme(legend.background = element_blank(),
+        panel.background = element_rect(colour = "black", size=0, fill=NA))
+
+ggsave(plot = pelagics_plot, filename = file.path(exp_path, "figures/pelagics_barplot.pdf"))
+
+
+maxN_summary |> 
+  filter(!str_detect(taxon , "Aspidontus|Ctenophora|Fistularia|Remora|Salpidae|Juvenile|Cubozoa|Crustacea|naucrates")) |> 
+  ggplot()+
+  geom_col(aes(x = fct_reorder(taxon, max_maxN), max_maxN, fill = location), position = "dodge")+
+  coord_flip() +
+  labs(x = "")
+```
+
+
+
+

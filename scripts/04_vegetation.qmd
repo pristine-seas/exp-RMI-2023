@@ -1,0 +1,72 @@
+---
+title: "RMI 2023 expedition report"
+subtitle: "Vegetation Surveys"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+theme: cosmo
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10, echo = F}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+library(gt)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+ggthemr::ggthemr('light')
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+
+veg_meta <- exp_meta$vegetation |> 
+  filter(location %in% c("Bikar", "Bokak"))
+```
+
+```{r}
+readxl::read_xlsx(file.path(exp_path, "data/primary/raw/vegetation/vegetation_surveys.xlsx"), 
+                  sheet = "Pisonia_plots") |> 
+  group_by(ps_station_id) |> 
+  summarize(n_ind = n(),
+            avg_size = 100*mean(perimeter)) |> 
+  ungroup() |> 
+  inner_join(veg_meta) |> 
+  select(location, lat, lon, size_m, n_ind, avg_size) |> 
+  mutate(ind_100m2 = 100*n_ind/size_m) |> 
+  select(-n_ind, -size_m)
+```
+```{r}
+readxl::read_xlsx(file.path(exp_path, "data/primary/raw/vegetation/vegetation_surveys.xlsx"), 
+                  sheet = "Flora_DACOR") |> 
+  select(-"Lat (N)", -"Long (East)") |> 
+  pivot_longer(!c(Island, Atol), names_to = "species", values_to = "rel_abundance") |> 
+  replace_na(list(rel_abundance = 0)) |> 
+  filter(Atol %in% c("Bikar", "Bokak")) |> 
+  group_by(Atol, species) |> 
+  summarize(rel_abundance = mean(rel_abundance)) |> 
+  ungroup() |> 
+  filter(rel_abundance > 0) |> 
+  mutate(dacor = case_when(rel_abundance > 4 ~ "Dominant",
+                           rel_abundance > 3 ~ "Abundant",
+                           rel_abundance > 2 ~ "Common",
+                           rel_abundance > 1 ~ "Ocasional",
+                           rel_abundance > 0 ~ "Rare")) |> 
+  select(-rel_abundance) |> 
+  pivot_wider(names_from = Atol, values_from = dacor) |> 
+  gt::gt() |> 
+  gt::gtsave(file.path(exp_path, "reports/Bikar and Bokak/tbls/veg_species.docx"))
+```
+

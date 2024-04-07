@@ -1,0 +1,112 @@
+---
+title: "RMI 2023 expedition report"
+subtitle: "Pelagic cameras"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+theme: cosmo
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message=F, warning = F, fig.width=10, fig.height=10, echo = F}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+library(gt)
+
+options(scipen=999)
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+ggthemr::ggthemr('fresh')
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
+
+bruvs_meta <- exp_meta$bruvs |> 
+  filter(location %in% c("Bikar", "Bokak")) 
+```
+
+```{r}
+maxN_data <- readxl::read_xlsx(file.path(exp_path, 
+                                         "data/primary/processed/bruvs",
+                                         "NG_Bik_Bok_Carch_2024_13_02.xlsx")) %>% 
+  janitor::clean_names() |> 
+  select(op_code, genus, species, max_n)
+
+maxN_data <- maxN_data |> 
+  mutate(station_number = str_replace_all(op_code, "-", "_") |> 
+           str_extract("[^_]+$") |> 
+           as.numeric() |> 
+           formatC( flag = 0, width = 2),
+         ps_station_id = paste0("RMI_bruvs_",station_number),
+         taxon = paste(genus, species)) |> 
+  select(ps_station_id, taxon, max_n)
+
+
+bruvs_meta <- bruvs_meta |> 
+  filter(!str_detect(ps_station_id, "02|22|28|29|30|31|32|33|34|35|36"))
+```
+
+
+```{r}
+maxN_data <- maxN_data |> 
+  pivot_wider(names_from = taxon, values_from = max_n, values_fill = 0) |> 
+  pivot_longer(!ps_station_id, names_to = "taxon", values_to = "max_n") |> 
+  left_join(bruvs_meta) |> 
+  select(ps_station_id, location, lat, lon, depth_m, taxon, max_n)
+```
+
+
+```{r}
+maxN_data |> 
+  group_by(location, taxon) |> 
+  summarize(avg_maxN = round(mean(max_n),2),
+            max_maxN = max(max_n),
+            n_stations = n_distinct(ps_station_id[max_n > 0])) |> 
+  left_join(bruvs_meta |> 
+              group_by(location) |> 
+              summarize(total_station = n_distinct(ps_station_id))) |> 
+  mutate(freq = round(100*n_stations/total_station)) |> 
+  select(location, taxon, avg_maxN, max_maxN, freq) |> 
+  filter(avg_maxN > 0) |> 
+  arrange(location, desc(avg_maxN)) |> 
+  gt::gt(rowname_col = "taxon") |> 
+  gt::cols_label(avg_maxN = "Mean maxN",
+                 max_maxN = "Max maxN",
+                 freq = "Frequency of observation (%)") |> 
+  gt::gtsave(file.path(exp_path, "reports/Bikar and Bokak/tbls/bruvs_summary.docx"))
+```
+
+```{r}
+maxN_data |> 
+  filter(location == "Bikar") |> 
+  group_by(ps_station_id, location, lat, lon) |> 
+  summarize(sum_maxN = sum(max_n)) |> 
+  st_as_sf(coords = c("lon", "lat"), 
+           crs = 4326) |> 
+  ggplot()+
+  geom_sf(aes(size = sum_maxN))
+
+
+maxN_data |> 
+  filter(location == "Bokak") |> 
+  group_by(ps_station_id, location, lat, lon) |> 
+  summarize(sum_maxN = sum(max_n)) |> 
+  st_as_sf(coords = c("lon", "lat"), 
+           crs = 4326) |> 
+  ggplot()+
+  geom_sf(aes(size = sum_maxN))
+```
+
+

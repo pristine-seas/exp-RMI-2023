@@ -503,6 +503,7 @@ master_meta |>
   gt::gt(rowname_col = "method") |> 
   gt::tab_header(title = "Number of workstations in each island") 
 ```
+
 ```{r eval = TRUE, include = T}
 library(mapview)
 master_meta_shp <- master_meta_shp %>% 

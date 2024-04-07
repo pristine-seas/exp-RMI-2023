@@ -25,7 +25,7 @@ ps_data_path <- file.path(ps_science_path, "datasets/")
 ```
 
 
-# bikar and bokak 12 nm
+# Bikar and Bokak MPA proposals
 
 ```{r}
 buffer_12nm <- sf::st_read(file.path(exp_path, 
@@ -35,6 +35,145 @@ box = c(xmin = 167.9965, ymin = 11.9301, xmax = 171.9825, ymax = 14.9932)
 
 buffer_12nm <- st_crop(buffer_12nm, box)
 
+plot(buffer_12nm)
+
+filled <- smoothr::fill_holes(buffer_12nm, threshold = 10000000000) 
+
+islands <- st_difference(filled, buffer_12nm) 
+
+plot(islands)
+```
+
+```{r}
+buffers_35nm <- islands |> 
+  st_cast("POLYGON") |> 
+  st_centroid() |> 
+  st_buffer(dist = (35)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands) 
+
+buffers_35nm |> 
+  st_area()/10^6
+
+proposal_35nm <- buffers_35nm |> 
+  vect() |> 
+  minRect()
+
+expanse(proposal_35nm)/10^6
+
+terra::writeVector(proposal_35nm, file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_35nm.shp"), overwrite=TRUE)
+
+st_write(buffers_35nm, file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_buffers_35nm.shp"), overwrite=TRUE)
+```
+
+```{r}
+proposal_30nm <- islands |> 
+  st_cast("POLYGON") |> 
+  st_centroid() |> 
+  st_buffer(dist = (30)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands)|> 
+  vect() |> 
+  minRect()
+
+expanse(proposal_30nm)/10^6
+
+terra::writeVector(proposal_30nm, file.path(exp_path, 
+                      "data/primary/processed/proposals/proposal_30nm.shp"), overwrite=TRUE)
+```
+
+
+
+```{r}
+# sf::st_write(buffer_12nm, file.path(exp_path, 
+#                       "data/secondary/processed/bikar_bokak_12nm.shp"))
+
+buffer_greyreefs <- buffer_12nm |> 
+  st_buffer(dist = (35 - 12)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands) 
+
+plot(buffer_greyreefs)
+
+st_area(buffer_greyreefs)/10^6
+
+sf::st_write(buffer_greyreefs, file.path(exp_path, 
+                      "data/secondary/processed/home_range_grey_reefs.shp"), append = F)
+```
+
+```{r}
+# Proposals
+
+proposal_35nm <- buffer_12nm |> 
+  st_buffer(dist = (35 - 12)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands) |> 
+  vect() |> 
+  minRect() 
+
+terra::writeVector(proposal_35nm, file.path(exp_path, 
+                      "data/secondary/processed/proposal_35nm.shp"), overwrite=TRUE)
+
+proposal_32nm <- buffer_12nm |> 
+  st_buffer(dist = (32 - 12)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands) |> 
+  vect() |> 
+  minRect() 
+
+terra::writeVector(proposal_32nm, file.path(exp_path, 
+                      "data/secondary/processed/proposal_32nm.shp"), overwrite=TRUE)
+
+proposal_30nm <- buffer_12nm |> 
+  st_buffer(dist = (30 - 12)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands) |> 
+  vect() |> 
+  minRect() 
+
+terra::writeVector(proposal_30nm, file.path(exp_path, 
+                      "data/secondary/processed/proposal_30nm.shp"), overwrite=TRUE)
+
+proposal_25nm <- buffer_12nm |> 
+  st_buffer(dist = (25 - 12)*1852) |> 
+  mutate(species = "Grey reef shark",
+         dist_m = "66 km") |> 
+  select(species, dist_m) |> 
+  smoothr::smooth(method = "ksmooth",  smoothness = 4) |> 
+  st_difference(islands) |> 
+  vect() |> 
+  minRect() 
+  
+terra::writeVector(proposal_25nm, file.path(exp_path, 
+                      "data/secondary/processed/proposal_25nm.shp"), overwrite=TRUE)
+
+
+list(proposal_25nm, proposal_30nm, proposal_32nm, proposal_35nm) |> map_dbl(expanse)
+```
+
+# bikar and bokak 12 nm
+
+```{r}
 buffer_redfoot_booby <- buffer_12nm |> 
   mutate(species = "Red-footed booby",
          dist_m = "86 km") |> 
