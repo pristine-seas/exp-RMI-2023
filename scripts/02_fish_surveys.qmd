@@ -149,6 +149,7 @@ fish_taxa |>
 fish_taxa |> 
   group_by(consumer) |> 
   summarize(n())
+
 # fish_taxa |> 
 #   filter(is.na(trophic)) |> 
 #   write_csv(file.path(exp_path, "data/primary/processed/missing_trophic_info.csv"))

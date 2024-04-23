@@ -37,6 +37,8 @@ exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
 ps_data_path <- file.path(ps_science_path, "datasets/")
 
 ggthemr::ggthemr('light')
+
+ggthemr::pa
 ```
 
 ```{r, eval = TRUE}
