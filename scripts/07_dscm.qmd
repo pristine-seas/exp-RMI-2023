@@ -172,3 +172,18 @@ dscm_meta <- dscm_meta |>
 bigrquery::bq_table_upload("pristine-seas.deep_sea_cameras.deployments", 
                            values = dscm_meta, fields = dscm_meta, write_disposition = 'WRITE_APPEND')
 ```
+
+```{r eval = F}
+all_deployments <- tbl(bq_connection, "pristine-seas.deep_sea_cameras.deployments") |> 
+  filter(!is.na(ps_site_id)) |> 
+  collect()
+
+all_deployments <- all_deployments |> 
+  filter(ps_expedition_id != "RMI_2023") |> 
+  bind_rows(dscm_meta) |> 
+  arrange(deployment_time)
+
+bigrquery::bq_table_upload("pristine-seas.deep_sea_cameras.deployments", 
+                           values = all_deployments, 
+                           fields = all_deployments)
+```
