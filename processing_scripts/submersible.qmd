@@ -1,0 +1,173 @@
+---
+title: "Submersible"
+number-sections: false
+date: today
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: right
+---
+
+```{r, message = F, warning = F, fig.width = 10, fig.height = 10, echo = F}
+library(paletteer)
+library(sf)
+library(bigrquery)
+library(gt)
+library(tidyverse)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_id <- "RMI_2023"
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+bigrquery::bq_auth(email = "marine.data.science@ngs.org")
+
+bq_connection <- DBI::dbConnect(bigrquery::bigquery(), project = "pristine-seas")
+```
+
+# Metadata
+
+```{r sub, eval = TRUE, include = T}
+sub_fieldbook <- readxl::read_excel(file.path(exp_path, 
+                                        paste0("data/primary/raw/sub/", exp_id, "_sub_metadata.xlsx"))) |> 
+  as_tibble() |> 
+  janitor::clean_names() |> 
+  rename(ps_site_id = ps_station_id,
+         date = date_dd_mm_yyyy,
+         dive_start_time = dive_start,
+         surface_start_lat = surface_start_latitude,
+         surface_start_lon = surface_start_longitude,
+         bottom_start_lat = bottom_start_latitude,
+         bottom_start_lon = bottom_start_longitude,
+         bottom_end_lat = bottom_end_latitude,
+         bottom_end_lon = bottom_end_longitude,
+         surface_end_lat = surface_end_latitude,
+         surface_end_lon = surface_end_longitude,
+         dive_end_time = resurface,
+         max_depth_m = max_depth,
+         temp_max_depth = max_depth_temp,
+         collected = collection)
+
+sub_meta <- sub_fieldbook |> 
+  mutate(ps_expedition_id = "RMI_2023", 
+         method = "Submersible dive",
+         ps_site_id = str_replace(ps_site_id, "RMI", "RMI_2023"),
+         date = lubridate::ymd(date),
+         bottom_time = hms::as_hms(bottom_time),
+         deepsee_dive_id = NA_character_,
+         collected = FALSE,
+         notes = as.character(notes),
+         temp_max_depth = as.numeric(temp_max_depth),
+         dive_start_time = lubridate::ymd_hms(dive_start_time, tz = "Pacific/Majuro"),
+         dive_end_time = lubridate::ymd_hms(dive_end_time, tz = "Pacific/Majuro"),
+         across(c(ends_with("lon"), ends_with("lat")),
+                ~str_remove_all(., "N|W|E|S") |> 
+                  str_trim() |> 
+                  str_squish() |> 
+                  str_replace_all(pattern = "\\'", replacement =  " "))) |> 
+  rowwise() |> 
+  mutate(across(c(ends_with("lon"), ends_with("lat")),
+                ~ if_else(!is.na(.), 
+                          measurements::conv_unit(., 
+                                                  from = 'deg_dec_min', to = 'dec_deg'),
+                          NA_character_))) |> 
+  mutate(across(c(ends_with("lon"), ends_with("lat")),
+                ~ as.numeric(.) |> 
+                            round(digits = 4)))
+  
+sub_meta <- sub_meta |> 
+  select(ps_expedition_id, method, ps_site_id, location, date, 
+         dive_start_time, dive_end_time, bottom_time,
+         surface_start_lon, surface_start_lat,  bottom_start_lon, bottom_start_lat,
+         bottom_end_lon, bottom_end_lat, surface_end_lon, surface_end_lat, 
+         max_depth_m, temp_max_depth, therm_start, therm_end, 
+         dive_type, collected, deepsee_dive_id, 
+         pilot, observer_1, observer_2,
+         notes,
+         everything()) 
+
+date(sub_meta$dive_start_time) <- sub_meta$date
+date(sub_meta$dive_end_time) <- sub_meta$date
+
+sub_meta$dive_start_time <- with_tz(sub_meta$dive_start_time, "UTC")
+sub_meta$dive_end_time <- with_tz(sub_meta$dive_end_time, "UTC")
+```
+
+```{r sub_map, eval = TRUE, include = T}
+tmp <- sub_meta |> 
+  filter(!is.na(max_depth_m),
+         !is.na(surface_start_lat)) |> 
+  st_as_sf(coords = c("surface_start_lon", "surface_start_lat"), crs = 4326) |> 
+  group_by(method, ps_site_id, location, max_depth_m, geometry) 
+
+mapview::mapview(tmp,
+                 zcol = c(depth_m = "max_depth_m"), 
+                 legend = TRUE,
+                 map.types = c("Esri.WorldImagery"),
+                 layer.name = "Depth (m)",
+                 popup = leafpop::popupTable(tmp,
+                                      zcol = c("method",
+                                               "ps_site_id",
+                                               "location",
+                                               "max_depth_m")))
+```
+
+```{r sub_table, eval = TRUE, include = T}
+sub_meta |> 
+  filter(!is.na(max_depth_m)) |> 
+  mutate(strata = case_when(max_depth_m < 500 ~ "<500m",
+                            max_depth_m < 1000 ~ "500-1000m",
+                            max_depth_m < 2000 ~ "1000-2000m",
+                            max_depth_m >= 2000 ~ "> 2000m")) |> 
+  group_by(location, strata) |> 
+  summarize(n_stations = n_distinct(ps_site_id),
+            mean_max_depth_m = round(mean(max_depth_m, na.rm = T),1),
+            min_max_depth_m = min(max_depth_m, na.rm = T),
+            max_max_depth_m = max(max_depth_m, na.rm = T)) |> 
+  ungroup() |> 
+  mutate_if(is.numeric, round, 3) |> 
+  gt::gt(groupname_col  = "location", rowname_col = "strata") |> 
+  tab_spanner(label = "Depth", columns = contains("depth")) |> 
+  grand_summary_rows(columns  = contains(c("n_stations")),
+                     fns = list(list(label = md("**Grand total**"), fn = "sum")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  grand_summary_rows(columns  = contains(c("mean_max_depth_m")),
+                     fns = list(list(label = md("**Grand total**"), fn = "mean")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  grand_summary_rows(columns  = contains(c("min_max_depth_m")),
+                     fns = list(list(label = md("**Grand total**"), fn = "min")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  grand_summary_rows(columns  = contains(c("max_max_depth_m")),
+                     fns = list(list(label = md("**Grand total**"), fn = "max")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  tab_header(title = "Number of submersible dives per location and depth") |> 
+  opt_align_table_header(align = "left") |> 
+  tab_style(locations = cells_grand_summary(),
+            style = cell_fill(color = "lightblue" |> adjust_luminance(steps = +2))) |> 
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_row_groups()) |> 
+  tab_options(ihtml.use_compact_mode = TRUE,
+              data_row.padding = px(5)) |> 
+  cols_label("n_stations" ~ "# Dives") |> 
+  cols_label_with(fn = ~str_extract(.x, "[^_]+") |> 
+                    str_to_sentence()) 
+```
+
+```{r sub_NAs, eval = TRUE, include = T}
+naniar::vis_miss(sub_meta)
+```
+
+```{r sub_export, eval = F}
+bq_table_create("pristine-seas.submersible.deepsee_dives", 
+                fields = as_bq_fields(sub_meta))
+
+bigrquery::bq_table_upload("pristine-seas.submersible.deepsee_dives", 
+                           values = sub_meta, fields = sub_meta, write_disposition = 'WRITE_APPEND')
+```

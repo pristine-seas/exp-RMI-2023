@@ -345,7 +345,8 @@ sub_meta <- readxl::read_xlsx(file.path(exp_path,
                   round(digits = 4))) |> 
   select(ps_station_id, location, everything()) %>% 
   mutate(method = "Submersible survey") |> 
-  select(expedition, method, ps_station_id, location, date, dive_start_time = dive_start, resurface_time = resurface, bottom_time, 
+  select(expedition, method, ps_station_id, location, date, dive_start_time = dive_start, 
+         resurface_time = resurface, bottom_time, 
          surface_start_lon = surface_start_longitude, surface_start_lat = surface_start_latitude,
          bottom_start_lat = bottom_start_latitude, bottom_start_lon = bottom_start_longitude,
          bottom_end_lat = bottom_end_latitude, bottom_end_lon = bottom_end_longitude,

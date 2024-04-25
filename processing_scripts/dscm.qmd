@@ -1,0 +1,191 @@
+---
+title: "Deep sea cameras"
+number-sections: false
+date: today
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: right
+---
+
+```{r, message = F, warning = F, fig.width = 10, fig.height = 10, echo = F}
+library(paletteer)
+library(sf)
+library(bigrquery)
+library(gt)
+library(tidyverse)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_id <- "RMI_2023"
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+bigrquery::bq_auth(email = "marine.data.science@ngs.org")
+
+bq_connection <- DBI::dbConnect(bigrquery::bigquery(), project = "pristine-seas")
+
+#grep("RMI", OlsonNames(), value=TRUE)
+```
+
+# Metadata 
+
+```{r clean, eval = TRUE, include = T}
+dscm_meta <- readxl::read_xlsx(file.path(exp_path,
+                                         "data/primary/raw/dscm/RMI_2023_dscm_fieldbook.xlsx")) |> 
+  janitor::clean_names() |> 
+  filter(!is.na(ps_station_id)) |> 
+  rename(ps_site_id = ps_station_id,
+         deployment_lon = lon_in,
+         deployment_lat = lat_in,
+         recovery_lon = lon_out,
+         recovery_lat = lat_out,
+         max_depth_m = depth_m,
+         bottom_type = habitat, 
+         extech_expedition_id = extech_exp_id,
+         lead_operator = team_lead,
+         deployment_time = time_in,
+         recovery_time = time_out,
+         deployment_date = date_in,
+         recovery_date = date_out,
+         mission_duration = mission_duration_hrs,
+         recording_time = recording_time_hrs) 
+
+dscm_meta <- dscm_meta |> 
+  rowwise() |> 
+  mutate(lead_operator = "Whitney Goodell",
+         method = "Deep sea camera",
+         ps_expedition_id = exp_id,
+         ps_site_id = str_replace(ps_site_id, "RMI", "RMI_2023"),
+         deployment_lat = as.numeric(deployment_lat),
+         deployment_lon = as.numeric(deployment_lon),
+         recovery_lat = as.numeric(recovery_lat),
+         recovery_lon = as.numeric(recovery_lon),
+         max_depth_m = round(as.numeric(max_depth_m)),
+         ballast_kg = round(as.numeric(ballast_kg)),
+         bait_kg = round(as.numeric(bait_kg)),
+         deployment_date = lubridate::ymd(deployment_date),
+         deployment_time = lubridate::ymd_hms(deployment_time, tz = "Pacific/Majuro" ),
+         recovery_time = lubridate::ymd_hms(recovery_time, tz = "Pacific/Majuro"),
+         recovery_date = lubridate::ymd(recovery_date),
+         mission_duration = hms::as_hms(mission_duration),
+         recording_time = hms::as_hms(recording_time))
+
+dscm_meta <- dscm_meta |> 
+  select(ps_expedition_id, method, ps_site_id, location, sublocation,
+         deployment_date, deployment_time, deployment_lon, deployment_lat, 
+         recovery_date, recovery_time, recovery_lon, recovery_lat,
+         mission_duration, recording_time,
+         max_depth_m,
+         bottom_type,
+         bait_type, bait_kg,
+         ballast_type, ballast_kg,
+         dscm_id, extech_expedition_id,
+         lead_operator, 
+         notes,
+         highlights,
+         everything()) |> 
+  arrange(ps_site_id)
+
+date(dscm_meta$deployment_time) <- dscm_meta$deployment_date
+date(dscm_meta$recovery_time) <- dscm_meta$recovery_date
+
+dscm_meta$deployment_time <- with_tz(dscm_meta$deployment_time, "UTC")
+dscm_meta$recovery_time <- with_tz(dscm_meta$recovery_time, "UTC")
+```
+
+```{r dscm_map, eval = TRUE, include = T}
+tmp <- dscm_meta |> 
+  filter(!is.na(max_depth_m)) |> 
+  st_as_sf(coords = c("deployment_lon", "deployment_lat"), crs = 4326) |> 
+  group_by(method, ps_site_id, location, max_depth_m, geometry) 
+
+mapview::mapview(tmp,
+                 zcol = c(depth_m = "max_depth_m"), 
+                 legend = TRUE,
+                 map.types = c("Esri.WorldImagery"),
+                 layer.name = "Depth (m)",
+                 popup = leafpop::popupTable(tmp,
+                                      zcol = c("method",
+                                               "ps_site_id",
+                                               "location",
+                                               "max_depth_m")))
+```
+
+```{r dscm_table, eval = TRUE, include = T}
+dscm_meta |> 
+  filter(!is.na(max_depth_m)) |> 
+  mutate(strata = case_when(max_depth_m < 500 ~ "<500m",
+                            max_depth_m < 1000 ~ "500-1000m",
+                            max_depth_m < 2000 ~ "1000-2000m",
+                            max_depth_m >= 2000 ~ "> 2000m")) |> 
+  group_by(location, strata) |> 
+  summarize(n_stations = n_distinct(ps_site_id),
+            mean_max_depth_m = round(mean(max_depth_m, na.rm = T),1),
+            min_max_depth_m = min(max_depth_m, na.rm = T),
+            max_max_depth_m = max(max_depth_m, na.rm = T)) |> 
+  ungroup() |> 
+  mutate_if(is.numeric, round, 3) |> 
+  gt::gt(groupname_col  = "location", rowname_col = "strata") |> 
+  tab_spanner(label = "Depth", columns = contains("depth")) |> 
+  grand_summary_rows(columns  = contains(c("n_stations")),
+                     fns = list(list(label = md("**Grand total**"), fn = "sum")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  grand_summary_rows(columns  = contains(c("mean_max_depth_m")),
+                     fns = list(list(label = md("**Grand total**"), fn = "mean")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  grand_summary_rows(columns  = contains(c("min_max_depth_m")),
+                     fns = list(list(label = md("**Grand total**"), fn = "min")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  grand_summary_rows(columns  = contains(c("max_max_depth_m")),
+                     fns = list(list(label = md("**Grand total**"), fn = "max")),
+                     fmt = ~ fmt_number(., decimals = 0, use_seps = FALSE)) |> 
+  tab_header(title = "Number of dropcam deployments per location and depth") |> 
+  opt_align_table_header(align = "left") |> 
+  tab_style(locations = cells_grand_summary(),
+            style = cell_fill(color = "lightblue" |> adjust_luminance(steps = +2))) |> 
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_row_groups()) |> 
+  tab_options(ihtml.use_compact_mode = TRUE,
+              data_row.padding = px(5)) |> 
+  cols_label("n_stations" ~ "# Deployments") |> 
+  cols_label_with(fn = ~str_extract(.x, "[^_]+") |> 
+                    str_to_sentence()) 
+```
+
+```{r dscm_NAs, eval = TRUE, include = T}
+naniar::vis_miss(dscm_meta)
+```
+
+```{r dscm_export, eval = F}
+dscm_colnames <- tbl(bq_connection, "pristine-seas.deep_sea_cameras.deployments") |> 
+  colnames() 
+
+dscm_meta <- dscm_meta |> 
+  mutate(sublocation = NA_character_) |> 
+  select(any_of(dscm_colnames))
+
+bigrquery::bq_table_upload("pristine-seas.deep_sea_cameras.deployments", 
+                           values = dscm_meta, fields = dscm_meta, write_disposition = 'WRITE_APPEND')
+```
+
+```{r eval = F}
+all_deployments <- tbl(bq_connection, "pristine-seas.deep_sea_cameras.deployments") |> 
+  filter(!is.na(ps_site_id)) |> 
+  collect()
+
+all_deployments <- all_deployments |> 
+  filter(ps_expedition_id != "RMI_2023") |> 
+  bind_rows(dscm_meta) |> 
+  arrange(deployment_time)
+
+bigrquery::bq_table_upload("pristine-seas.deep_sea_cameras.deployments", 
+                           values = all_deployments, 
+                           fields = all_deployments)
+```
