@@ -61,7 +61,7 @@ sub_meta <- sub_fieldbook |>
          ps_site_id = str_replace(ps_site_id, "RMI", "RMI_2023"),
          date = lubridate::ymd(date),
          bottom_time = hms::as_hms(bottom_time),
-         deepsee_dive_id = NA_character_,
+         deepsee_dive_id = NA_integer_,
          collected = FALSE,
          notes = as.character(notes),
          temp_max_depth = as.numeric(temp_max_depth),
@@ -165,8 +165,12 @@ naniar::vis_miss(sub_meta)
 ```
 
 ```{r sub_export, eval = F}
-bq_table_create("pristine-seas.submersible.deepsee_dives", 
-                fields = as_bq_fields(sub_meta))
+all_dives <- tbl(bq_connection, "pristine-seas.submersible.deepsee_dives") |> 
+  filter(!is.na(ps_site_id)) |> 
+  collect()
+
+sub_meta <- sub_meta |> 
+  select(any_of(colnames(all_dives)))
 
 bigrquery::bq_table_upload("pristine-seas.submersible.deepsee_dives", 
                            values = sub_meta, fields = sub_meta, write_disposition = 'WRITE_APPEND')

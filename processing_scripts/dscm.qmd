@@ -32,6 +32,7 @@ bigrquery::bq_auth(email = "marine.data.science@ngs.org")
 bq_connection <- DBI::dbConnect(bigrquery::bigquery(), project = "pristine-seas")
 
 #grep("RMI", OlsonNames(), value=TRUE)
+grep("Niue", OlsonNames(), value=TRUE)
 ```
 
 # Metadata 
