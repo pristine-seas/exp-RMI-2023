@@ -95,9 +95,6 @@ sub_meta <- sub_meta |>
 
 date(sub_meta$dive_start_time) <- sub_meta$date
 date(sub_meta$dive_end_time) <- sub_meta$date
-
-sub_meta$dive_start_time <- with_tz(sub_meta$dive_start_time, "UTC")
-sub_meta$dive_end_time <- with_tz(sub_meta$dive_end_time, "UTC")
 ```
 
 ```{r sub_map, eval = TRUE, include = T}
