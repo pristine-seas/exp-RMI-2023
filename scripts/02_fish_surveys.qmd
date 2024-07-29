@@ -22,8 +22,6 @@ library(gt)
 
 knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
 
-ggthemr::ggthemr('fresh')
-
 PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
 
 exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
@@ -216,7 +214,7 @@ save(fish_taxa, biomass_by_obs, biomass_by_strata_and_taxa,
 # High level summary
 
 ```{r}
-load(file = file.path(exp_path, "data/primary/output/fish_surveys.Rdata"))
+load(file = file.path(exp_path, "data/primary/output/fish-surveys/fish_surveys.Rdata"))
 
 summary_by_strata <- biomass_by_strata_and_taxa |> 
   left_join(fish_meta |> distinct(ps_station_id, location, exposure, habitat)) |> 
@@ -231,7 +229,11 @@ summary_by_taxa <- biomass_by_strata_and_taxa |>
   summarise(frq = 100*sum(gr_m2 > 0)/n(),
             across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
   ungroup() |> 
-  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic, family, class, order))
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic, family, class, order)) |> 
+  mutate(across(c("frq","ind_m2",  "gr_m2"), round, 3))
+
+summary_by_taxa |> 
+    write_csv(file.path(exp_path, "data/primary/output/fish-surveys/fish_surveys_summary_by_taxa.csv"))
 ```
 
 ```{r}
@@ -246,14 +248,16 @@ summary_by_taxa |>
               summarise(n_stations = n_distinct(ps_station_id),
                         across(c("n_taxa"), 
                                mean, na.rm = T))) |> 
-  select(location, n_stations, total_richness, n_fams, n_taxa, ind_m2, gr_m2)
+  select(location, n_stations, total_richness, n_fams, n_taxa, ind_m2, gr_m2) |> 
+  mutate(across(c("n_taxa","ind_m2",  "gr_m2"), round, 3)) |> 
+  write_csv(file.path(exp_path, "data/primary/output/fish-surveys/fish_surveys_summary.csv"))
 ```
 
 # Depth effect 
 
 ```{r}
 (depth_plot <- summary_by_strata |> 
-  dplyr::filter(location %in% c("Bikar", "Bokak")) |> 
+  dplyr::filter(location %in% c("Rongerik", "Bikini")) |> 
   ggstatsplot::grouped_ggbetweenstats(x     = depth_strata,
                                       y     = gr_m2,
                                       grouping.var = location,
@@ -263,36 +267,31 @@ summary_by_taxa |>
                                       package          = "ggsci",
                                       plotgrid.args    = list(nrow = 1)))
 
-ggsave(depth_plot, filename = file.path(exp_path, "figures/fish_biomass_violin_by_location.png"), width = 10)
+ggsave(depth_plot, filename = file.path(exp_path, 
+                                        "figures/Bikini-Rongerik/fish_biomass_by_depth.png"), 
+       width = 10)
 ```
 
 ```{r}
-# summary_by_strata |> 
-#   left_join(fish_meta |> distinct(location, ps_station_id)) |> 
-#   group_by(location, depth_strata) |> 
-#   summarize(across(c("n_taxa", "ind_m2" ,  "gr_m2"), list(avg = mean,sd = sd), na.rm = T)) |> 
-#   ungroup() |> 
-#   filter(location %in% c("Bikar", "Bokak")) |> 
-#   mutate_if(is.numeric, round, 1) |> 
-#   transmute(location, depth_strata, n_taxa = paste(n_taxa_avg, " (",n_taxa_sd, ")", sep = ""),
-#             ind_m2 = paste(ind_m2_avg, " (",ind_m2_sd, ")", sep = ""),
-#             gr_m2 = paste(gr_m2_avg, " (",gr_m2_sd, ")", sep = "")) |> 
-#   dplyr::group_by(location) 
-#   gt() |> 
-#   cols_label(n_taxa ~ "# Taxa",
-#              ind_m2 ~ "Abundance (ind/m2)",
-#              gr_m2 ~ "Biomass (g/m2)",
-#              depth_strata ~ "Depth strata") |> 
-#   tab_footnote("Standard deviations shown in parenthesis") 
-  # gt::gtsave(file.path(exp_path, "reports/Bikar and Bokak/tbls/fish_biomass.docx"))
+ summary_by_strata |> 
+   left_join(fish_meta |> distinct(location, ps_station_id)) |> 
+   group_by(location, depth_strata) |> 
+   summarize(across(c("n_taxa", "ind_m2" ,  "gr_m2"), list(avg = mean,sd = sd), na.rm = T)) |> 
+   ungroup() |> 
+   mutate_if(is.numeric, round, 1) |> 
+   transmute(location, depth_strata, n_taxa = paste(n_taxa_avg, " (",n_taxa_sd, ")", sep = ""),
+             ind_m2 = paste(ind_m2_avg, " (",ind_m2_sd, ")", sep = ""),
+             gr_m2 = paste(gr_m2_avg, " (",gr_m2_sd, ")", sep = "")) |> 
+   dplyr::group_by(location) |> 
+  write_csv(file.path(exp_path, "data/primary/output/fish-surveys/fish_surveys_summary_by_depth.csv"))
 ```
 
 ```{r}
 transect_adonis <- vegan::adonis2(summary_by_strata %>% 
-                                    filter(location %in% c("Bikar", "Bokak")) |> 
+                                    filter(location %in% c("Bikini", "Rongerik")) |> 
                                     select(gr_m2) ~  location + depth_strata + exposure + habitat, 
                                   data = summary_by_strata |> 
-                                    filter(location %in% c("Bikar", "Bokak")) ,
+                                    filter(location %in% c("Bikini", "Rongerik")) ,
                                   #strata = summary_by_strata$location,
                                   permutations = 1000,
                                   by = "margin",
@@ -308,7 +307,7 @@ broom::tidy(transect_adonis) %>%
 
 ```{r}
 (fish_taxatreemap <- summary_by_taxa |> 
-  filter(location %in% c("Bikar", "Bokak")) |> 
+  filter(location %in% c("Bikini", "Rongerik")) |> 
   group_by(order, family, common_family) |> 
   summarize(n_taxa = n_distinct(taxon_valid_name[frq > 0]),
             across(c("ind_m2", "gr_m2"), 
@@ -326,8 +325,9 @@ broom::tidy(transect_adonis) %>%
   scale_fill_manual(values = paletteer_d("ggsci::default_igv")))
 
 ggsave(fish_taxatreemap,
-       filename = file.path(exp_path, "figures/fish_taxatreemap.png"), width = 10)
+       filename = file.path(exp_path, "figures/Bikini-Rongerik/fish_taxatreemap.png"), width = 10)
 ```
+
 
 ## Top taxa
 
@@ -335,45 +335,49 @@ ggsave(fish_taxatreemap,
 summary_by_taxa |> 
   group_by(location) |> 
   slice_max(n = 10, gr_m2) |> 
-  select(location, trophic, common_family, everything(), - order, -family, -class)
+  select(location, trophic, common_family, everything(), - order, -family, -class) 
 ```
 
 ## Differences by island
 
 ```{r}
-bikar_sp <- unique(summary_by_taxa$taxon_valid_name[summary_by_taxa$location == "Bikar" & 
+bikini_sp <- unique(summary_by_taxa$taxon_valid_name[summary_by_taxa$location == "Bikini" & 
                                                       summary_by_taxa$gr_m2 > 0])
 
-bokak_sp <- unique(summary_by_taxa$taxon_valid_name[summary_by_taxa$location == "Bokak" & 
+rongerik_sp <- unique(summary_by_taxa$taxon_valid_name[summary_by_taxa$location == "Rongerik" & 
                                                       summary_by_taxa$gr_m2 > 0])
 
-tmp_ls <- list(bikar = bikar_sp, bokak = bokak_sp)
+tmp_ls <- list(bikini = bikini_sp, rongerik = rongerik_sp)
 
 ggVennDiagram::ggVennDiagram(x = tmp_ls,
                              lwd = 0.8, category.names = names(tmp_ls))+
   scale_fill_gradient(low = "#F4FAFE", high = "#4981BF")+
    theme(legend.position = "none")
 ```
+
+
 ```{r}
 taxa_diffs <- summary_by_taxa |> 
-  filter(location %in% c("Bikar", "Bokak")) |> 
+  filter(location %in% c("Bikini", "Rongerik")) |> 
   select(location, taxon_valid_name, gr_m2) |> 
   pivot_wider(names_from = location, values_from = gr_m2) |> 
-  mutate(gap = abs(Bokak - Bikar)) |> 
+  mutate(gap = abs(Bikini - Rongerik)) |> 
   group_by(taxon_valid_name) %>% 
-  mutate(max = max(Bokak, Bikar)) %>% 
+  mutate(max = max(Bikini, Rongerik)) %>% 
   ungroup() |> 
   mutate(taxon_valid_name=forcats::fct_reorder(taxon_valid_name, abs(gap)))
 
 taxa_diffs |> 
-  filter(Bikar == 0 | Bokak == 0) |> 
-  arrange(desc(gap))
+  filter(Rongerik == 0 | Bikini == 0) |> 
+  arrange(desc(gap)) |> 
+  filter(!(Rongerik == 0 & Bikini == 0)) |> 
+  write_csv(file.path(exp_path, "data/primary/output/fish-surveys/fish_surveys_taxa_diffs.csv"))
 ```
 
 ```{r}
 taxa_diffs_long <- taxa_diffs |> 
-  filter(Bikar == 0 | Bokak == 0) |> 
-  pivot_longer(c(Bikar, Bokak)) |> 
+  filter(Rongerik == 0 | Bikini == 0) |> 
+  pivot_longer(c(Rongerik, Bikini)) |> 
   slice_max(n = 60, gap) 
 
 diff_plot <- taxa_diffs_long |> 
@@ -403,11 +407,11 @@ diff_plot <- taxa_diffs_long |>
         axis.title = element_blank(),
         panel.grid = element_blank()
         ) +
-  labs(x="Biomass (g/m2)",y=NULL, title = "Fish species with largest differences in biomass between Bikar and Bokak") +
+  labs(x="Biomass (g/m2)",y=NULL, title = "Fish species with largest biomass difference (g/m2) between Bikini and Rongerik") +
   scale_color_manual(values=c("#436685", "#BF2F24"))
 
 ggsave(diff_plot,
-       filename = file.path(exp_path, "figures/fish_biomass_comparison_between_islands.png"), width = 10)
+       filename = file.path(exp_path, "figures/Bikini-Rongerik/fish_biomass_comparison_between_islands.png"), width = 10, height = 12)
 ```
 
 # Trophic
@@ -431,7 +435,7 @@ summary_by_trophic <- biomass_by_strata_and_taxa |>
   group_by(location, depth_strata, trophic) |> 
   summarise(across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
   ungroup() |> 
-  filter(location %in% c("Bikar", "Bokak")) |> 
+  #filter(location %in% c("Bikini", "Rongerik")) |> 
   group_by(location) |> 
   mutate(pct_biomass = 100*gr_m2/sum(gr_m2),
          trophic = case_when(trophic == "Top-predator sharks" ~ "Sharks",
@@ -439,10 +443,15 @@ summary_by_trophic <- biomass_by_strata_and_taxa |>
                              TRUE ~ trophic)) |> 
   arrange(location, pct_biomass) |> 
   mutate(location = paste(location, depth_strata, sep = "-"),
-         trophic = factor(trophic)) 
+         trophic = factor(trophic)) |> 
+  mutate_if(is.numeric, round, 3)
+
+write_csv(summary_by_trophic, 
+          file.path(exp_path, "data/primary/output/fish-surveys/fish_surveys_summary_by_trophic.csv"))
+
 
 tmp <- summary_by_trophic |> 
-  bind_rows(biomass_ref_pts ) |> 
+  #bind_rows(biomass_ref_pts ) |> 
   ggplot()+
   geom_col(aes(x = fct_reorder(location, gr_m2, sum, na.rm = T, .desc = T), 
                y = gr_m2), 
@@ -452,8 +461,8 @@ tmp <- summary_by_trophic |>
                y = gr_m2, 
                fill = fct_relevel(trophic, "Sharks", "Other top predators", "Lower-carnivores","Planktivore","Herbivores")
                ))+
-  geom_point(data = biomass_ref_pts |> filter(protection_level == "Fully/Highly protected"),
-             aes(x = location, y = gr_m2 + 5 ), shape = 8, col = "black", size = .5)+
+  #geom_point(data = biomass_ref_pts |> filter(protection_level == "Fully/Highly protected"),
+   #          aes(x = location, y = gr_m2 + 5 ), shape = 8, col = "black", size = .5)+
   labs(x = "", y = "Average fish biomass (g/m2)", fill ="") +
   ylab(bquote('Average fish biomass '(g/m^2)))+
   ggthemes::theme_clean()+
@@ -465,7 +474,7 @@ tmp <- summary_by_trophic |>
   #paletteer::scale_fill_paletteer_d(palette = "ggthemr::flat")+
   scale_y_continuous(expand = c(0,0))
   
-ggsave(tmp, filename = file.path(exp_path, "figures/fish_biomass.png"), width = 15)
+ggsave(tmp, filename = file.path(exp_path, "figures/Bikini-Rongerik/fish_biomass.png"), width = 15)
 ```
 
 ```{r}
@@ -478,11 +487,14 @@ summary_by_trophic_family <- biomass_by_strata_and_taxa |>
   group_by(location, common_family, trophic) |> 
   summarise(across(c("ind_m2",  "gr_m2"), mean, na.rm = T)) |> 
   ungroup() |> 
-  filter(location %in% c("Bikar", "Bokak")) |> 
   group_by(location) |> 
   mutate(pct = 100*gr_m2/sum(gr_m2)) |> 
-  ungroup()
+  ungroup() |> 
+  mutate_if(is.numeric, round, 3)
   
+write_csv(summary_by_trophic_family, 
+          file.path(exp_path, "data/primary/output/fish-surveys/fish_surveys_summary_by_trophic_and_family.csv"))
+
 tst <- summary_by_trophic_family |> 
   slice_max(n = 30, gr_m2) |> 
   group_by(location) |> 
@@ -493,7 +505,8 @@ tst <- summary_by_trophic_family |>
   facet_wrap("location")+
   labs(x = "")
 
-ggsave(tst, filename = file.path(exp_path, "figures/test_fish_biomass_by_family.png"), width = 10)
+ggsave(tst, 
+       filename = file.path(exp_path, "figures/Bikini-Rongerik/test_fish_biomass_by_family.png"), width = 10)
 ```
 
 

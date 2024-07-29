@@ -23,7 +23,6 @@ library(gt)
 options(scipen=999)
 knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
 
-ggthemr::ggthemr('fresh')
 
 PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
 
@@ -33,16 +32,113 @@ ps_data_path <- file.path(ps_science_path, "datasets/")
 
 load(file.path(exp_path, "data/primary/output/expedition_metadata.Rdata"))
 
-bruvs_meta <- exp_meta$bruvs |> 
-  filter(location %in% c("Bikar", "Bokak")) 
+bruvs_meta <- exp_meta$bruvs
+```
+
+# New
+```{r}
+uwa_meta |> 
+  group_by(location) |> 
+  summarize(n_distinct(ps_station_id))
 ```
 
 ```{r}
-maxN_data <- readxl::read_xlsx(file.path(exp_path, 
-                                         "data/primary/processed/bruvs",
-                                         "NG_Bik_Bok_Carch_2024_13_02.xlsx")) %>% 
+uwa_meta <- readxl::read_xlsx(file.path(exp_path, 
+                                         "data/primary/raw/bruvs",
+                                         "RMIS23_AllData_Seabed_2024_04_30.xlsx"),
+                               sheet = "Metadata") |> 
   janitor::clean_names() |> 
-  select(op_code, genus, species, max_n)
+  distinct(op_code = opcode, location = site, original_opcode) |> 
+  mutate(ps_station_id = str_replace(original_opcode, "uvs", "bruvs")) |> 
+  select(-original_opcode)
+
+maxN_data <- readxl::read_xlsx(file.path(exp_path, 
+                                         "data/primary/raw/bruvs",
+                                         "RMIS23_AllData_Seabed_2024_04_30.xlsx"),
+                               sheet = "MaxN") %>% 
+  janitor::clean_names() |> 
+  filter(family == "Carcharhinidae") |> 
+  rename(taxon = binomial) |> 
+  left_join(uwa_meta) |> 
+    select(location, ps_station_id, taxon, max_n)
+
+maxN_data <- maxN_data |> 
+  pivot_wider(names_from = taxon, values_from = max_n, values_fill = 0) |> 
+  pivot_longer(!c(ps_station_id, location), names_to = "taxon", values_to = "max_n") |> 
+  left_join(bruvs_meta) |> 
+  select(ps_station_id, location, lat, lon, depth_m, taxon, max_n)
+```
+```{r}
+maxN_data |> 
+  group_by(location, taxon) |> 
+  summarize(avg_maxN = round(mean(max_n),2),
+            max_maxN = max(max_n),
+            n_stations = n_distinct(ps_station_id[max_n > 0])) |> 
+  left_join(bruvs_meta |> 
+              group_by(location) |> 
+              summarize(total_station = n_distinct(ps_station_id))) |> 
+  mutate(freq = round(100*n_stations/total_station)) |> 
+  select(location, taxon, avg_maxN, max_maxN, freq) |> 
+  filter(avg_maxN > 0, location %in% c("Bikini", "Rongerik")) |> 
+  arrange(location, desc(avg_maxN)) |> 
+  gt::gt(rowname_col = "taxon") |> 
+  gt::cols_label(avg_maxN = "Mean maxN",
+                 max_maxN = "Max maxN",
+                 freq = "Frequency of observation (%)") |> 
+  gt::gtsave(file.path(exp_path, "reports/Rongerik and Bikini/tbls/bruvs_summary.docx"))
+```
+
+```{r spatial_patterns}
+maxn_shp <- maxN_data |> 
+  #filter(location == "Bikini") |> 
+  group_by(ps_station_id, location, lat, lon) |> 
+  summarize(sum_maxN = sum(max_n)) |> 
+  st_as_sf(coords = c("lon", "lat"), 
+           crs = 4326)
+
+sf::write_sf(maxn_shp, file.path(exp_path, "data/primary/processed/bruvs/bruvs_maxN.shp"))
+```
+
+
+## lengths
+
+```{r}
+length_data <- readxl::read_xlsx(file.path(exp_path, 
+                                         "data/primary/raw/bruvs",
+                                         "RMIS23_AllData_Seabed_2024_04_30.xlsx"),
+                               sheet = "Lengths") %>% 
+  janitor::clean_names() |> 
+  filter(family == "Carcharhinidae") |> 
+  rename(taxon = binomial) |> 
+  left_join(uwa_meta) |> 
+  select(location, ps_station_id, taxon, length_cm)
+
+length_data |> 
+  group_by(location, taxon) |> 
+  summarise(std_length = round(sd(length_cm),2),
+            avg_length = round(mean(length_cm),2),
+            max_length = max(length_cm),
+            min_length = min(length_cm))
+```
+```{r}
+length_data |> 
+  filter(location %in% c("Bikini", "Rongerik")) |> 
+  ggplot()+
+  geom_boxplot(aes(x = taxon, y = length_cm))+
+  facet_wrap(~location, scales = "free_y")+
+  coord_flip()
+```
+
+
+# OLD
+
+```{r}
+maxN_data <- readxl::read_xlsx(file.path(exp_path, 
+                                         "data/primary/raw/bruvs",
+                                         "RMIS23_AllData_Seabed_2024_04_30.xlsx"),
+                               sheet = "MaxN") %>% 
+  janitor::clean_names() |> 
+  select(opcode, genus, species, max_n)
 
 maxN_data <- maxN_data |> 
   mutate(station_number = str_replace_all(op_code, "-", "_") |> 
@@ -53,11 +149,9 @@ maxN_data <- maxN_data |>
          taxon = paste(genus, species)) |> 
   select(ps_station_id, taxon, max_n)
 
-
 bruvs_meta <- bruvs_meta |> 
   filter(!str_detect(ps_station_id, "02|22|28|29|30|31|32|33|34|35|36"))
 ```
-
 
 ```{r}
 maxN_data <- maxN_data |> 
@@ -66,7 +160,6 @@ maxN_data <- maxN_data |>
   left_join(bruvs_meta) |> 
   select(ps_station_id, location, lat, lon, depth_m, taxon, max_n)
 ```
-
 
 ```{r}
 maxN_data |> 
