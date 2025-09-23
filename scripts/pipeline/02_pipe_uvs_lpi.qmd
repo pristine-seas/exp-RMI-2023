@@ -1,0 +1,1036 @@
+---
+title: "Benthos LPI - Data Pipeline"
+date: today
+format: 
+  html:
+    theme: minty
+    self-contained: true
+    code-fold: true
+    toc: true 
+    toc-depth: 3
+    toc-location: right
+    html-table-processing: none
+execute:
+  fig-width: 10
+---
+
+```{r setup, message = F, warning = F, fig.width = 10, fig.height = 10, echo = F}
+options(scipen = 999)
+
+# Hook to format inline numeric expressions with comma separators:
+knitr::knit_hooks$set(inline = function(x) {
+  # For non-numeric values, just return as character
+  if (!is.numeric(x)) {return(as.character(x))}
+  # Format numbers with comma as big.mark, no scientific notation
+  else format(x, big.mark = ",", scientific = FALSE)})
+
+library(sf)
+library(hms)
+library(readxl)
+library(janitor)
+library(lubridate)
+library(gt)
+library(pointblank)
+library(tidyverse)
+library(bigrquery)
+library(leaflet)
+library(leaflet.extras)
+library(ggtext)
+library(PristineSeasR2)
+
+
+ps_paths <- PristineSeasR2::get_drive_paths()
+
+exp_id <- "RMI_2023"
+
+exp_path <- file.path(ps_paths$expeditions, str_replace(exp_id, "_", "-"))
+
+bigrquery::bq_auth(email = "marine.data.science@ngs.org")
+
+bq_connection <- DBI::dbConnect(bigrquery::bigquery(), project = "pristine-seas")
+```
+
+This documentation outlines the end-to-end pipeline for processing benthos Line Point Intercept (LPI) survey data collected during Pristine Seas expeditions. The pipeline ingests raw field data, standardizes formats, performs taxonomy lookups, applies rigorous quality assurance/quality control (QA/QC), computes station-level summaries, and loads the clean data into the Pristine Seas Science Database in BigQuery.
+
+## Data ingestion
+
+### Sites
+
+We begin by reading the UVS (Underwater Visual Survey) site information and standardizing it to match our database schema. Key steps include:
+
+  - Harmonizing field names using
+  - Converting data types (e.g., date, time, boolean fields) to their appropriate formats.
+  - Constructing ps_site_id using expedition and site identifiers.
+  
+```{r}
+uvs_sites <- tbl(bq_connection, "uvs.sites") |> 
+   filter(exp_id == "RMI_2023") |> 
+   collect()
+
+# Validate site data
+cat("Sites loaded:", nrow(uvs_sites), "\n")
+cat("Regions:", unique(uvs_sites$region), "\n")
+cat("Subregions:", unique(uvs_sites$subregion), "\n")
+```
+
+### Fieldbooks
+
+Next, process field observations from different divers, ensuring consistent formatting and traceability.
+
+  - Field names are harmonized, and units are standardized.
+  - Unique observation IDs (obs_id) are generated for QA/QC.
+  - Field data is cleaned and formatted to ensure database compatibility.
+
+```{r}
+process_lpi_fieldbook <- function(file_path, 
+                                  diver_name,
+                                  sections_range,
+                                  contacts_range) {
+  
+  sections_raw <- read_xlsx(file_path,
+                            sheet         = "Point contact",
+                            range         = sections_range,
+                            col_names     = FALSE,
+                            .name_repair  = "minimal") |>
+    t() |>
+    as_tibble(.name_repair = "minimal") |> 
+    row_to_names(row_number = 1) |>
+    clean_names()
+  
+  sections <- sections_raw |> 
+    mutate(transect_section = rep(c("0-10", "10-20", "20-30", "30-40", "40-50"), n_distinct(station_label)),
+           depth_m          = parse_number(depth_m),
+           site             = str_pad(parse_number(station_label), 3, pad = "0"),
+           station_label    = str_remove(station_label, "\\d+"),
+           ps_site_id       = paste(exp_id, "uvs", site, sep = "_")) |> 
+    group_by(ps_site_id, station_label) |>
+    mutate(station_depth_m = mean(depth_m, na.rm = TRUE),
+           n_sections = n()) |> 
+    ungroup() |> 
+    mutate(exp_id         = exp_id,
+           survey_type    = "uvs",
+           method         = "lpi",
+           diver          = diver_name,
+           depth_strata   = stratify(station_depth_m),
+           ps_station_id  = paste(ps_site_id, station_suffix(depth_strata), sep = "_"),
+           section_id     = paste(ps_station_id, station_label, transect_section, sep = "_")) |> 
+    select(exp_id, survey_type, ps_site_id, ps_station_id, method, diver, 
+           depth_m, station_depth_m, depth_strata, station_label, 
+           transect_section, section_id)
+  
+  full_ids       = sections$section_id
+  sections_valid = sections |> filter(!is.na(depth_m))
+  valid_ids      = sections_valid$section_id
+  
+  contacts_raw <- read_xlsx(file_path,
+                            sheet         = "Point contact",
+                            range         = contacts_range,
+                            col_names     = FALSE,
+                            .name_repair  = "minimal") 
+  
+  contacts <- contacts_raw |>
+    set_names(c("morphotaxon", "field_name", full_ids)) |>
+    select(morphotaxon, field_name, all_of(valid_ids)) |>
+    mutate(across(all_of(valid_ids), as.character)) |>
+    pivot_longer(cols      = -c(morphotaxon, field_name),  # Exclude BOTH taxonomy columns
+                 names_to  = "section_id",
+                 values_to = "contacts") |>
+    mutate(contacts = parse_number(contacts)) |>
+    filter(!is.na(contacts)) |>
+    select(section_id, morphotaxon, field_name, contacts)
+  
+  section_totals <- contacts |>
+    group_by(section_id) |>
+    summarise(n_points = sum(contacts, na.rm = TRUE),
+              .groups  = "drop")
+  
+  sections_final <- sections_valid |>
+    left_join(section_totals, by = "section_id")
+  
+  contacts_final <- contacts |>
+    left_join(select(sections_valid, section_id, exp_id, ps_station_id, station_label, transect_section, diver, depth_m), 
+              by = "section_id") |>
+    select(ps_station_id, exp_id, diver, station_label, depth_m, transect_section, morphotaxon, field_name, contacts, section_id) |>
+    arrange(ps_station_id, station_label, transect_section) 
+  
+  return(list(
+    sections = sections_final,
+    contacts = contacts_final
+  ))
+  
+}
+```
+
+```{r}
+kikes_data <- process_lpi_fieldbook(file_path = file.path(exp_path, "data/primary/raw/benthos/MARSHALLS_Transsects-rough_kike.xlsx"),
+                                diver_name = "Kike Ballesteros",
+                                sections_range = "C1:QF2",
+                                contacts_range = "B5:QF85")
+
+mollys_data <- process_lpi_fieldbook(file_path = file.path(exp_path, "data/primary/raw/benthos/RMI_LPI_Molly.xlsx"),
+                                diver_name = "Molly Timmers",
+                                sections_range = "B1:DH2",
+                                contacts_range = "A5:DH48")
+
+lpi_sections <- bind_rows(kikes_data$sections,
+                          mollys_data$sections) |> 
+  rename(transect_label = station_label)
+
+lpi_contacts <- bind_rows(kikes_data$contacts,
+                          mollys_data$contacts) |> 
+    rename(transect_label = station_label)
+```
+
+## QA/QC Process
+
+### Stations
+
+Validate station data to ensure consistency and completeness.
+
+  - Ensure station IDs are unique
+  - Confirm the correct number of points (typically 250 per station).
+  - Enforce allowed values for habitat and exposure fields.
+  
+```{r}
+lpi_stations <- lpi_sections |> 
+  group_by(ps_station_id, ps_site_id, exp_id, diver, depth_strata) |> 
+  summarize(depth_m = round(mean(depth_m)),
+            n_transects = n_distinct(transect_label),
+            n_sections = n_distinct(section_id),
+            n_points = sum(n_points),
+            survey_dist_m = n_sections*10,
+            .groups = "drop") |> 
+  left_join(uvs_sites |> 
+              distinct(ps_site_id, region, subregion, locality, habitat, exposure),
+            by = "ps_site_id") |> 
+  select(ps_station_id, ps_site_id, exp_id,
+         region, subregion, locality, habitat, exposure, diver, depth_m, depth_strata,          
+         n_transects, survey_dist_m, n_points)
+```
+
+```{r}
+# Station QA/QC using pointblank
+station_qaqc <- lpi_stations |> 
+  create_agent(label = "Benthos LPI Stations QA/QC", tbl_name = "lpi_stations") |> 
+  rows_distinct(ps_station_id,
+                label = "Station IDs are unique",
+                actions = action_levels(stop_at = 0.001)) |>
+  col_vals_equal(columns = vars(n_transects), 
+                 value = 1,
+                 label = "Expected 1 transects per station",
+                 actions = action_levels(warn_at = 0.001)) |>
+  col_vals_equal(columns = vars(n_points), 
+                 value = 250,
+                 label = "Expected 250 points per station",
+                 actions = action_levels(warn_at = 0.001)) |> 
+  interrogate()
+
+# Display QA/QC results
+station_qaqc
+```
+
+Now, lets visualize the distribution of our sampling effort and summarize it by region and subregion to inspect any potential outliers.
+
+```{r}
+#| label: fig-map
+#| fig-cap: "Interactive map of LPI survey stations"
+
+# Create spatial features
+lpi_sites_sf <- uvs_sites |> 
+  select(ps_site_id, region, subregion, locality, habitat, exposure, latitude, longitude) |> 
+  inner_join(
+    lpi_stations |> 
+      group_by(ps_site_id) |> 
+      summarize(team = paste(unique(diver), collapse = "/"),
+                strata = paste(unique(paste(depth_strata, " (", depth_m, "m)", sep = "")), 
+                               collapse = "\n"),
+                survey_dist = sum(survey_dist_m),
+                n_stations = n_distinct(ps_station_id),
+                .groups = "drop"),
+    by = "ps_site_id") |> 
+  sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326) 
+
+# Create interactive map
+mapview::mapview(lpi_sites_sf,
+                 zcol = "exposure",
+                 legend = TRUE,
+                 col.regions = ps_colors("exposure"),
+                 map.types = "Esri.WorldImagery",
+                 layer.name = "Exposure",
+                 popup = leafpop::popupTable(lpi_sites_sf, 
+                                             zcol = c("ps_site_id", "strata", "team", "survey_dist", "habitat", "exposure"))) |> 
+  leafem::addMouseCoordinates() |> 
+  addFullscreenControl()
+```
+
+```{r eval = T, include = T}
+#| label: tbl-lpi-stations
+#| tbl-cap: "Number of LPI survey stations by depth strata"
+
+lpi_stations |> 
+  group_by(region, subregion, depth_strata) |>
+  summarise(n = n_distinct(ps_station_id), .groups = "drop") |> 
+  pivot_wider(names_from = depth_strata, values_from = n, values_fill = 0) |> 
+  mutate(Total = rowSums(across(where(is.numeric)), na.rm = TRUE)) |>
+  gt(groupname_col = "region") |> 
+  tab_options(table.font.size = 12,
+              data_row.padding = px(5),
+              table.width = pct(90),
+              row_group.as_column = TRUE) |> 
+  tab_source_note(source_note = "Depth strata: supershallow (< 6 m), shallow (7-14 m), deep (15-30 m)") |> 
+  tab_spanner(label = "Depth Strata", 
+              columns = c("deep", "shallow", "supershallow")) |> 
+  cols_label(subregion = "Subregion") |>
+  fmt_number(columns = where(is.numeric), decimals = 0)
+```
+
+**Summary:** We conducted bethos LPI surveys at **`r n_distinct(lpi_stations$ps_site_id)`** sites and **`r n_distinct(lpi_stations$ps_station_id)`** stations during the `r exp_id` expedition. Across **`r n_distinct(lpi_stations$region)`** regions, we surveyed a total area of **`r sum(lpi_stations$survey_dist_m)`** m of reef habitats.
+
+### Observations
+
+#### Merge LPI and Coral
+
+Now, we merge the broad LPI data with the hard coral contacts from the coral specialist. In theory, divers follow the same transect line and identify taxa at the same contact points, but inevitably, factors such as currents, surge, and diver bias can lead to differences in the number of hard coral contacts recorded. The goal is to reconcile these differences while preserving the integrity of the systematic LPI sampling framework.
+
+We accomplish this by:
+
+  - Trusting the LPI totals - The systematic LPI method provides unbiased estimates of overall hard coral abundance
+  - Leveraging coral specialist expertise - The coral diver provides high-resolution taxonomic identification
+  - Proportional apportionment - We distribute the LPI hard coral total among coral species based on the proportions observed by the coral specialist
+
+Edge case handling:
+
+  - Normal case (both divers recorded hard coral): LPI hard coral total is apportioned among coral species based on specialist's observed proportions
+  - Incomplete transect (LPI recorded hard coral, but coral specialist has no data): Hard coral remains as generic "Scleractinian" category, indicating the coral specialist was unable to complete identification for that section
+  - Methodological discrepancy / Off-transect observations (coral specialist found species but LPI recorded zero hard coral): Species records are classified as off-transect observations with transect_section = "Off" and aggregated at the station level. This preserves species occurrence data while maintaining the integrity of systematic transect sampling by clearly separating opportunistic observations from quantitative abundance estimates.
+
+This approach maintains the statistical rigor of the LPI methodology while gaining the taxonomic resolution needed for coral community analysis. The resulting dataset preserves both the overall hard coral coverage (from LPI) and the species composition (from coral specialist), providing the best of both sampling approaches.
+
+
+```{r align}
+# Explore section alignment
+
+# Calculate LPI hard coral totals by section
+
+lpi_sections <- lpi_sections |> 
+  left_join(lpi_contacts |>
+              group_by(section_id) |>
+              summarise(lpi_coral_pts = sum(contacts[morphotaxon == "Hard coral"], na.rm = TRUE),
+                        .groups       = "drop")) |> 
+  mutate(lpi_pct_coral = round(100 * lpi_coral_pts / n_points, 2))
+
+# and by station
+
+lpi_stations <- lpi_stations |> 
+  left_join(lpi_contacts |> 
+              group_by(ps_station_id) |>
+              summarise(lpi_coral_pts = sum(contacts[morphotaxon == "Hard coral"], na.rm = TRUE),
+                        .groups       = "drop")) |> 
+  mutate(lpi_pct_coral = round(100 * lpi_coral_pts / n_points, 2))
+
+total_lpi_pts <- sum(lpi_contacts$contacts)
+total_lpi_coral_pts <- sum(lpi_contacts$contacts[lpi_contacts$morphotaxon == "Hard coral"])
+```
+
+```{r}
+# Now read the coral data 
+
+coral_sections <- readxl::read_xlsx(file.path(exp_path,
+                            "data/primary/raw/benthos/RMI_Coral_Data.xlsx"),
+                  n_max = 5, 
+                  col_names = FALSE) %>%
+  janitor::clean_names() %>%
+  column_to_rownames(var = "x1") %>% 
+  t() %>% 
+  as_tibble() 
+
+coral_sections <- coral_sections |> 
+  mutate(transect_section = if_else(transect_section == "1-10" , "0-10", transect_section),
+         depth_m          = parse_number(depth_m),
+         site             = str_pad(parse_number(station_label), 3, pad = "0"),
+         station_label    = str_remove(station_label, "\\d+"),
+         ps_site_id       = paste(exp_id, "uvs", site, sep = "_")) |> 
+  group_by(ps_site_id, station_label) |>
+  mutate(station_depth_m = mean(depth_m, na.rm = TRUE),
+         n_sections = n()) |> 
+  ungroup() |> 
+  mutate(exp_id         = exp_id,
+         survey_type    = "uvs",
+         method         = "lpi",
+         diver          = "Molly Timmers",
+         depth_strata   = stratify(station_depth_m),
+         ps_station_id  = paste(ps_site_id, station_suffix(depth_strata), sep = "_"),
+         section_id     = paste(ps_station_id, station_label, transect_section, sep = "_")) |> 
+  select(exp_id, survey_type, ps_site_id, ps_station_id, method, diver, 
+         depth_m, station_depth_m, depth_strata, station_label, 
+         transect_section, section_id)
+
+coral_contacts <- readxl::read_xlsx(file.path(exp_path,
+                                       "data/primary/raw/benthos/RMI_Coral_Data.xlsx"),
+                             range = "A6:UJ58",
+                            col_names     = FALSE,
+                            .name_repair  = "minimal")
+  
+coral_contacts <- coral_contacts |>
+    set_names(c("morphotaxon", coral_sections$section_id)) |>
+    select(morphotaxon, all_of(coral_sections$section_id)) |>
+    mutate(across(all_of(coral_sections$section_id), as.character)) |>
+    pivot_longer(cols      = -c(morphotaxon),  # Exclude BOTH taxonomy columns
+                 names_to  = "section_id",
+                 values_to = "contacts") |>
+    mutate(contacts = parse_number(contacts)) |>
+    filter(!is.na(contacts)) |>
+    select(section_id, morphotaxon, contacts)
+
+coral_contacts <- coral_contacts |> 
+  left_join(coral_sections |> 
+              select(section_id, ps_station_id))
+
+coral_sections <- coral_sections |> 
+  left_join(coral_contacts |> 
+              group_by(section_id) |> 
+              summarize(coral_pts = sum(contacts)))
+```
+
+
+```{r}
+# Station Alignment
+
+station_alignment <- lpi_stations |> 
+  full_join(coral_sections |> 
+  group_by(ps_station_id) |> 
+  summarize(coral_pts = sum(coral_pts, na.rm = T))) 
+
+station_alignment |> 
+  get_dupes(ps_station_id)
+
+station_alignment |> 
+  filter(is.na(coral_pts) | is.na(lpi_coral_pts))
+
+diffs <- station_alignment |> 
+  mutate(diff = abs(coral_pts - lpi_coral_pts),
+         diff_pct = 100*(lpi_coral_pts - coral_pts)/lpi_coral_pts) |> 
+  arrange(desc(diff))
+
+station_alignment |> 
+  ggplot()+
+  geom_point(aes(lpi_coral_pts, coral_pts))+
+  geom_line(aes(lpi_coral_pts, lpi_coral_pts))
+
+ggplot(diffs)+
+  geom_histogram(aes(diff_pct), binwidth = 2)
+```
+
+```{r}
+section_alignment <- lpi_sections |> 
+  full_join(coral_sections |> 
+              select(section_id, coral_pts),
+            by = c("section_id")) |> 
+  mutate(match = case_when(# Alignment
+                           lpi_coral_pts > 0   & coral_pts > 0     ~ "normal",
+                           lpi_coral_pts ==  0 & (coral_pts  ==  0 | is.na(coral_pts))  ~ "normal",
+                           # LPI data only (these become "Scleractinia")
+                           lpi_coral_pts > 0   & (is.na(coral_pts) | coral_pts == 0)   ~ "lpi_only",
+                           lpi_coral_pts == 0  & coral_pts > 0        ~ "off transect",
+                           is.na(lpi_coral_pts)  & !is.na(coral_pts)  ~ "specialist_only"),
+         diff = lpi_coral_pts - coral_pts)
+
+section_alignment |> 
+  group_by(match) |> 
+  summarize(n_sections = n_distinct(section_id),
+            n_pts = sum(lpi_coral_pts, na.rm = T))
+
+section_alignment |> 
+  ggplot()+
+  geom_point(aes(lpi_coral_pts, coral_pts))+
+  geom_line(aes(lpi_coral_pts, lpi_coral_pts))
+```
+
+
+```{r}
+normal_section_ids <- section_alignment$section_id[section_alignment$match == "normal"]
+
+taxa_proportions <- coral_contacts |> 
+  group_by(ps_station_id, section_id) |>
+  mutate(prop_contacts = contacts / sum(contacts)) |>
+  ungroup() |> 
+  filter(contacts > 0) |> 
+  select(ps_station_id, section_id, morphotaxon, prop_contacts)
+
+match_normal <- section_alignment |> 
+  filter(match == "normal") |> 
+  mutate(diver = "Molly Timmers") |> 
+  left_join(taxa_proportions |> 
+              filter(section_id %in% normal_section_ids),
+            by = c("ps_station_id", "section_id"),
+            suffix = c("_lpi", "_coral")) |> 
+   mutate(contacts = lpi_coral_pts * prop_contacts) |> 
+  filter(!is.na(ps_station_id), !is.na(morphotaxon))
+
+match_lpi_only <- section_alignment |> 
+  filter(match == "lpi_only") |> 
+  mutate(morphotaxon =  "Scleractinia",
+         contacts = lpi_coral_pts) |> 
+  filter(!is.na(ps_station_id))
+
+off_transect_obs <- section_alignment |> 
+  filter(match == "off transect") |> 
+    mutate(diver = "Molly Timmers") |> 
+  left_join(taxa_proportions,
+            by = c("ps_station_id", "section_id"),
+            suffix = c("_lpi", "_coral")) |> 
+  mutate(contacts = 0,
+         transect_section = "Off",
+         section_id =  paste(ps_station_id, transect_section, sep = "_")) 
+
+apportioned_coral_pts <- bind_rows(match_normal, match_lpi_only, off_transect_obs) |> 
+  select(-lpi_coral_pts, -lpi_pct_coral, -coral_pts, -prop_contacts, -match, -diff, -n_points) |> 
+  mutate(contacts = round(contacts, 3))
+
+sum(apportioned_coral_pts$contacts, na.rm = T)/total_lpi_coral_pts
+
+# Combine with non-coral LPI data to create complete dataset
+
+lpi_contacts_non_coral <- lpi_contacts |>
+  filter(morphotaxon != "Hard coral") 
+
+complete_lpi_data <- bind_rows(lpi_contacts_non_coral,           # All non-coral categories
+                               apportioned_coral_pts |> 
+                                 select(-survey_type, -method, -ps_site_id, -depth_strata) |> 
+                                 mutate(functional_group = "Hard coral") # Apportioned coral species
+                               ) |> 
+  filter(contacts > 0 | transect_section == "Off") |> 
+  # Remove field name
+  group_by(section_id, ps_station_id, exp_id, diver, transect_label, depth_m, transect_section, morphotaxon) |> 
+  summarize(contacts = sum(contacts),
+            .groups = "drop") |> 
+  arrange(ps_station_id, section_id, morphotaxon) 
+
+
+divers_per_station <- complete_lpi_data |> 
+  ungroup() |> 
+  group_by(ps_station_id) |> 
+  summarize(divers = paste0(sort(unique(diver)), collapse = " | ")) |> 
+  ungroup()
+
+lpi_stations <- lpi_stations |> 
+  select(-diver, -lpi_pct_coral, -lpi_coral_pts) |> 
+  left_join(divers_per_station) |> 
+  relocate(divers, .after = locality)
+```
+
+### Taxa
+
+```{r}
+complete_lpi_data <- complete_lpi_data |> 
+  mutate(morphotaxon = str_replace(morphotaxon, "urvilliana", "urvilleana"),
+         morphotaxon = str_replace(morphotaxon, "Turbinaria stellata", "Turbinaria stellulata"),
+         morphotaxon = str_replace(morphotaxon, "Turbinaria rectiformis", "Turbinaria reniformis"),
+         morphotaxon = str_replace(morphotaxon, "bikiniensis", "bikinensis"),
+         morphotaxon = str_replace(morphotaxon, "gambieriensis", "gambierensis"),
+         morphotaxon = str_replace(morphotaxon, "Distichophora", "Distichopora"),
+         morphotaxon = str_replace(morphotaxon, "kuroshiro", "kuroshio"),
+         morphotaxon = str_replace(morphotaxon, "Diademnid", "Didemnum"))
+         
+lpi_taxa <- complete_lpi_data |> 
+  group_by(morphotaxon) |> 
+  summarize(contacts = sum(contacts),
+            .groups = "drop") |>
+  mutate(pct_contacts = round(100 * contacts / sum(contacts), 2)) |> 
+  arrange(desc(pct_contacts)) |> 
+  mutate(taxon_clean = morphotaxon |>
+           str_remove(regex("\\blike.*", ignore_case = TRUE)) |>          # remove "like..." and everything after
+           str_remove(regex("\\bsp(p)?\\.?\\b.*", ignore_case = TRUE)) |> # remove "sp.", "spp.", etc.
+           str_remove(regex("\\bcf\\.|aff\\.", ignore_case = TRUE)) |>    # remove "cf.", "aff."
+           str_remove_all("[\\?\\(\\)]") |>                               # remove question marks and parens
+           str_remove_all("\\*") |> 
+           str_squish() |> 
+           str_to_sentence(),
+        taxon_clean = case_when(morphotaxon %in% c("CCA", "CCA unidentified") ~ "Corallinales",
+                                morphotaxon == "Halimeda taenicola mini"      ~ "Halimeda taenicola",
+                                taxon_clean == "Haliclona osiris"             ~ "Haliclona (Reniera) osiris",
+                                taxon_clean == "Caulerpa filicoides andamanensis"  ~ "Caulerpa filicoides var. andamanensis",
+                                taxon_clean == "Acropora staghorn"                 ~ "Acropora",
+                                TRUE ~ taxon_clean
+                                )) |> 
+  select(taxon_clean, everything()) |> 
+  filter(!taxon_clean %in% c("Sediment", "Turf", "Barren", "Rubble/barren"))
+```
+
+```{r}
+# Let's check against our Taxonomic Reference Table
+
+benthos_taxa_lut <- tbl(bq_connection, "taxonomy.benthos") |> 
+  filter(!is.na(taxon_name)) |> 
+  collect()
+
+# Create name-to-AphiaID mapping
+
+names_to_aphiaID <- benthos_taxa_lut |> 
+  select(accepted_aphia_id, taxon_name, accepted_name) |>
+  pivot_longer(cols = c("taxon_name", "accepted_name"), names_to = "orig_col", values_to = "lookup_name") |>
+  filter(!is.na(lookup_name)) |>
+  distinct(accepted_aphia_id, lookup_name) 
+
+lpi_taxa <- lpi_taxa |> 
+  left_join(names_to_aphiaID, 
+            by = c("taxon_clean" = "lookup_name")) 
+lpi_taxa |> 
+  filter(is.na(accepted_aphia_id))
+```
+
+```{r eval = F}
+new_taxa <- lpi_taxa |> 
+  filter(is.na(accepted_aphia_id)) |> 
+  select(morphotaxon, taxon_clean, pct_contacts)
+
+new_worms_records <- purrr::map_dfr(new_taxa$taxon_clean, 
+                            ~worrms::wm_records_names(.x)) |> 
+  select(taxon_clean = scientificname, aphia_id = AphiaID, rank, 
+         name_status = status, accepted_name = valid_name, accepted_aphia_id = valid_AphiaID) |> 
+  mutate(rank = str_to_lower(rank))
+
+get_taxonomic_ranks <- function(id) {
+  tryCatch(
+    {worrms::wm_classification(id) |>
+        select(rank, scientificname) |>
+        pivot_wider(names_from = rank, values_from = scientificname) |>
+        mutate(accepted_aphia_id = id)},
+    error = function(e) {
+      tibble(accepted_aphia_id = id)
+    })
+  }
+
+library(furrr)
+
+new_taxonomy_ranks <- furrr::future_map_dfr(new_worms_records$accepted_aphia_id,
+                                 get_taxonomic_ranks,
+                                 .options = furrr_options(seed = TRUE)) |>
+  clean_names() |>
+  select(accepted_aphia_id, kingdom, phylum, class, order, family, genus)
+
+new_taxa <- new_taxa |> 
+  left_join(new_worms_records) |> 
+  left_join(new_taxonomy_ranks) |> 
+  rename(taxon_name = taxon_clean,
+         status = name_status) |> 
+  select(-morphotaxon, -pct_contacts) 
+
+new_taxa$phylum[new_taxa$taxon_name == "Dasya anastomosans"] <- "Rhodophyta"
+new_taxa$phylum[new_taxa$taxon_name %in% c("Valonia macrophysa", "Bryopsis pennata")] <- "Chlorophyta"
+
+new_taxa <- new_taxa |> 
+  mutate(functional_group = case_when(taxon_name %in% c("Bryopsis pennata", "Dasya anastomosans", "Valonia macrophysa") ~ "algae_erect",
+                                      taxon_name == "Stylaster sanguineus" ~ "hydrozoans"))
+
+# upload to BQ
+
+bq_table_upload(bq_table("pristine-seas", "taxonomy", "benthos"),
+                values = new_taxa,
+                create_disposition = "CREATE_NEVER",
+                write_disposition = "WRITE_APPEND")
+```
+
+```{r}
+lpi_taxa <- lpi_taxa |> 
+  left_join(benthos_taxa_lut |> 
+              filter(!aphia_id %in% c(224174, 1341, 224179), !is.na(accepted_aphia_id)) |> 
+              distinct(accepted_aphia_id, accepted_name, rank, functional_group, family))
+
+# Aggregate to morphotaxa level (remove field name level)
+
+lpi_taxa <- lpi_taxa |> 
+  group_by(functional_group, morphotaxon, accepted_name, accepted_aphia_id, rank, family) |> 
+  summarize(contacts = sum(contacts), 
+            pct_contacts = sum(pct_contacts),
+            .groups = "drop")
+```
+
+```{r}
+# Combine with contacts data
+
+clean_lpi <- complete_lpi_data |> 
+  left_join(lpi_taxa |> 
+              distinct(morphotaxon, accepted_name, accepted_aphia_id, rank, functional_group, family), 
+            by = "morphotaxon") |> 
+  mutate(functional_group = case_when(morphotaxon %in% c("Barren", "Sediment", "Rubble/barren") ~ "sediment|rubble|barren", 
+                                      morphotaxon == "Turf" ~ "turf",
+                                      TRUE ~ functional_group)) |> 
+  select(ps_station_id, exp_id, diver, depth_m, transect_label, transect_section, 
+         morphotaxon, accepted_name, accepted_aphia_id, rank, family, functional_group, contacts) 
+
+clean_lpi |> 
+  filter(is.na(functional_group))
+```
+
+```{r}
+clean_lpi |> 
+  group_by(functional_group) |> 
+  summarize(n_morphotaxa = n_distinct(morphotaxon),
+            n_AphiaIDs = n_distinct(accepted_aphia_id),
+            contacts = sum(contacts),
+            .groups = "drop") |> 
+  mutate(pct_contacts = round(100*contacts/sum(contacts), 2)) |> 
+  arrange(desc(pct_contacts)) 
+```
+
+```{r}
+clean_lpi |> 
+  get_dupes(ps_station_id, transect_label, transect_section, morphotaxon)
+```
+
+## Calculate: % Cover by taxa and station
+
+```{r}
+cover_by_station_and_taxa <- clean_lpi |>
+  filter(transect_section != "Off") |>
+
+  # 1. Section-level % cover (for SD)
+  group_by(ps_station_id, transect_label, transect_section) |>
+  mutate(pct_cover_section = 100 * contacts / sum(contacts)) |>
+  ungroup() |>
+
+  # 2. Fill missing taxa × section combos
+  group_by(diver, ps_station_id, transect_label) |>
+  complete(
+    nesting(transect_section),
+    nesting(functional_group, morphotaxon, accepted_name, accepted_aphia_id, rank, family),
+    fill = list(contacts = 0, pct_cover_section = 0)
+  ) |>
+  ungroup() |>
+
+  # 3. Compute total contacts and SD across sections
+  group_by(diver, ps_station_id, morphotaxon, accepted_name, accepted_aphia_id, functional_group, rank, family) |>
+  summarize(
+    total_contacts = sum(contacts),
+    pct_cover_sd = sd(pct_cover_section),
+    .groups = "drop"
+  ) |>
+
+  # 4. Compute compositional % cover
+  group_by(ps_station_id) |>
+  mutate(pct_cover = 100 * total_contacts / sum(total_contacts)) |>
+  ungroup() |> 
+  filter(total_contacts > 0)
+
+cover_by_station_and_taxa |> 
+  group_by(ps_station_id) |> 
+  summarize(round(sum(pct_cover)))
+```
+
+
+```{r}
+cover_by_station_and_taxa <- cover_by_station_and_taxa |> 
+  left_join(lpi_stations |> 
+              select(exp_id, ps_station_id, ps_site_id, region, subregion, habitat, exposure, depth_strata, depth_m),
+            by = "ps_station_id") |> 
+  select(ps_station_id, ps_site_id, exp_id, region, subregion, habitat, exposure, depth_strata, depth_m, 
+         diver, morphotaxon, accepted_name,  accepted_aphia_id, rank, family, functional_group, everything())
+
+grps_order <- c("cyanobacteria", "eam","sediment|rubble|barren", "other", "turf", "algae_encrusting",
+                "algae_erect","sponges", "soft_coral","cca", "hard_coral")
+
+cover_by_station_and_group <- cover_by_station_and_taxa |> 
+  mutate(functional_group = case_when(functional_group %in% c("bryozoans","worms","echinoderms", "molluscs", "hydrozoans", "ascidians", "other_cnidarians") ~ "other",
+                                      functional_group %in% c("hard_coral_dead") ~ "sediment|rubble|barren",
+                                      TRUE ~ functional_group)) |> 
+  group_by(region, subregion, ps_site_id, ps_station_id, depth_strata, functional_group) |> 
+  summarize(pct_cover = round(sum(pct_cover),2),
+            .groups = "drop") |> 
+  pivot_wider(names_from = functional_group, values_from = pct_cover, values_fill = 0) |> 
+  pivot_longer(cols = -c(ps_station_id, region, subregion, depth_strata, ps_site_id), names_to = "functional_group", values_to = "pct_cover") |>  
+  mutate(functional_group = fct_relevel(functional_group, grps_order))
+```
+
+## Station Summary
+
+Aggregate metrics at the station level for ecological analysis.
+  
+```{r}
+n_morphotaxa <- cover_by_station_and_taxa |> 
+  group_by(ps_station_id) |> 
+  summarize(n_morphotaxa = n_distinct(morphotaxon),
+            .groups = "drop") 
+
+station_summary <- lpi_stations |> 
+  left_join(n_morphotaxa) |> 
+  left_join(cover_by_station_and_group |>  
+              select(-region, -depth_strata, -subregion) |> 
+              pivot_wider(names_from = functional_group, 
+                          names_prefix = "pct_",
+                          values_from = c(pct_cover), 
+                          values_fill = 0) |> 
+              janitor::clean_names() |> 
+              rename(pct_coral = pct_hard_coral,
+                     pct_rubble = pct_sediment_rubble_barren,
+                     pct_cyano = pct_cyanobacteria,
+                     pct_algae_encrust = pct_algae_encrusting))
+
+station_summary |> 
+  filter(exposure != "lagoon") |> 
+  group_by(region, depth_strata) |> 
+  summarise(across(contains("pct"), mean), .groups = "drop") |> 
+  mutate_if(is.numeric, round, 1)
+```
+
+## Explore
+
+```{r}
+cover_by_station_and_group |> 
+  mutate(site = str_extract(ps_site_id, "[^_]+$")) |> 
+  filter(depth_strata != "supershallow") |> 
+  ggplot()+
+  geom_col(aes(site, pct_cover, fill = functional_group))+
+  facet_grid(depth_strata~region, scales = "free")+
+  scale_fill_manual(values = ps_colors("functional_groups"))+
+  ggthemes::theme_fivethirtyeight()+
+  labs(x = NULL, y = "Benthic composition (% of station total)",
+       fill = "Functional group",
+       title = "Benthic cover composition by site, region, and depth")+
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold"),
+        legend.position = "bottom",
+        legend.key.height = unit(4, "mm"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r}
+cover_by_station_and_group |> 
+  group_by(region, subregion, depth_strata, functional_group) |> 
+  summarize(pct_cover = mean(pct_cover)) |> 
+  ungroup() |> 
+  filter(depth_strata != "supershallow") |> 
+  ggplot()+
+  geom_col(aes(subregion, pct_cover, fill = functional_group))+
+  facet_grid(depth_strata~region, scales = "free")+
+  scale_fill_manual(values = ps_colors("functional_groups"))+
+  ggthemes::theme_fivethirtyeight()+
+  labs(x = NULL, y = "Benthic composition (% of station total)",
+       fill = "Functional group",
+       title = "Benthic cover composition by subregion, and depth")+
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold"),
+        legend.position = "bottom",
+        legend.key.height = unit(4, "mm"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r}
+station_summary |> 
+  group_by(region, subregion, habitat, depth_strata) |> 
+  summarize(pct_coral = mean(pct_coral)) |> 
+  ggplot(aes(x = subregion, y = pct_coral, fill = (pct_coral)))+
+  geom_col()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom",
+        legend.box = "horizontal")+
+  facet_grid(habitat~depth_strata, scales = "free")+
+  labs(y = "Avg. % Cover",
+       x = "",
+       title = "Average % Hard Coral Cover by Subregion",
+       fill = "")+
+  #scale_y_continuous(expand = expansion(mult = c(0, 0.05)))+
+  ggthemes::theme_fivethirtyeight()
+```
+
+Examine how key ecological metrics vary across depth strata to understand vertical zonation patterns.
+
+```{r}
+#| label: fig-transects-summary
+#| fig-cap: "Comparison of species richness, total count, density, and biomass across depth strata"
+
+station_summary |> 
+  select(ps_station_id, depth_strata, pct_coral, pct_cca, pct_cyano, pct_turf, pct_algae_erect, pct_rubble) |> 
+  pivot_longer(cols = -c(ps_station_id, depth_strata),
+               names_to = "functional_group",
+               values_to = "pct_cover") |> 
+  ggplot(aes(x = depth_strata, y = pct_cover, fill = depth_strata)) +
+  geom_boxplot(alpha = 0.6, color = "gray40", outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 1, alpha = 0.5, color = "gray30") +
+  facet_wrap(~functional_group, scales = "free_y") +
+  labs(x = "", 
+       y = "",
+       title = "**Cover by Depth Strata**",
+       subtitle = "Comparison of % cover by main functional groups across depth strata") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_markdown(size = 18, face = "bold"),
+        plot.subtitle = element_text(size = 12, face = "italic"),
+        strip.text = element_text(size = 12, face = "bold"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_line(color = "gray90"),
+        panel.grid.major.x = element_blank())+
+  scale_fill_manual(values = ps_colors("depth_strata"))
+```
+
+Identify and visualize the most cover-dominant species to understand community drivers.
+
+```{r warning = F}
+#| label: fig-top-taxa
+#| fig-cap: "Biomass distributions for top taxa and depth strata"
+#| fig-width: 12
+#| fig-height: 8
+
+library(ggplot2)
+library(dplyr)
+library(ggtext)
+library(RColorBrewer)
+
+# Identify major taxa based on average % cover (after filling with zeros)
+
+plot_df <- cover_by_station_and_taxa |> 
+  select(ps_station_id, morphotaxon, accepted_name, functional_group, accepted_aphia_id, rank, pct_cover, total_contacts) |> 
+  complete(ps_station_id, 
+           nesting(morphotaxon, accepted_name, functional_group, accepted_aphia_id, rank),
+           fill = list(pct_cover = 0,
+                       total_contacts = 0))
+
+taxa_means <- plot_df |> 
+  group_by(morphotaxon) |> 
+  summarise(mean_cover = mean(pct_cover, na.rm = TRUE),
+            median_cover = median(pct_cover, na.rm = TRUE)) |> 
+  arrange(desc(median_cover), desc(mean_cover)) 
+
+top_taxa <- taxa_means |> 
+  head(12) |> 
+  pull(morphotaxon)
+
+# Compute means and medians for each depth stratum
+depth_summary <- plot_df |> 
+  left_join(lpi_stations, by = "ps_station_id") |> 
+  filter(morphotaxon %in% top_taxa) |> 
+  group_by(morphotaxon, depth_strata) |> 
+  summarise(mean_cover = mean(pct_cover, na.rm = TRUE),
+    median_cover = median(pct_cover, na.rm = TRUE),
+    .groups = "drop") 
+
+# Plot
+
+plot_df |> 
+  left_join(lpi_stations) |> 
+  filter(morphotaxon %in% top_taxa) |> 
+  ggplot(aes(x = depth_strata, y = pct_cover, fill = morphotaxon)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5, color = "gray30") +
+  geom_jitter(aes(color = morphotaxon), width = 0.2, size = 1.2, alpha = 0.6)+
+  geom_text(data = depth_summary, 
+            aes(label = paste0("Med: ", round(median_cover, 2)), 
+                y = median_cover), 
+            vjust = -0.5, size = 3, color = "black") +
+  geom_text(data = depth_summary, 
+            aes(label = paste0("Mean: ", round(mean_cover, 2)), 
+                y = mean_cover), 
+            vjust = 1.5, size = 3, color = "red")+
+  facet_wrap(~ morphotaxon, scales = "free_y") +
+  scale_y_continuous(trans = "log10",
+                     breaks = c(0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000),
+                     labels = c("0", "0.001", "0.01", "0.1", "1", "10", "100", "1000"))+
+  labs(x = "", 
+       y = "% cover", 
+       title = "**% Cover by Major Taxa**",
+       subtitle = "Depth-stratified boxplots with jittered observations, mean (red) and median (black) labels") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+    plot.title = element_markdown(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic"),
+    strip.text = element_text(size = 12, face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_line(color = "gray90"),
+    panel.grid.major.x = element_blank())+
+  paletteer::scale_fill_paletteer_d("ggsci::default_igv") +
+  paletteer::scale_color_paletteer_d("ggsci::default_igv")
+```
+
+## Database integration
+
+### Pre-upload Validation
+
+Final validation checks before uploading to the Pristine Seas Science Database.
+
+```{r}
+# Validate data completeness
+validation_summary <- list(
+  stations = list(
+    total_records = nrow(station_summary),
+    complete_records = sum(complete.cases(station_summary |> select(-locality))),
+    missing_critical = sum(is.na(station_summary$ps_station_id) | 
+                          is.na(station_summary$exp_id) | 
+                          is.na(station_summary$region))
+  ),
+  contacts = list(
+    total_points = sum(clean_lpi$contacts),
+    total_records = nrow(clean_lpi),
+    complete_records = sum(complete.cases(clean_lpi)),
+    species_count = n_distinct(clean_lpi$accepted_name),
+    morphotaxon_count = n_distinct(clean_lpi$morphotaxon)
+  )
+)
+
+# Display validation summary
+cat("📊 Data Validation Summary\n")
+cat("========================\n\n")
+
+cat("Station Summary:\n")
+cat("  - Total records:", validation_summary$stations$total_records, "\n")
+cat("  - Complete records:", validation_summary$stations$complete_records, "\n")
+cat("  - Missing critical fields:", validation_summary$stations$missing_critical, "\n\n")
+
+cat("Points:\n")
+cat("  - Total points:", validation_summary$contacts$total_points, "\n")
+cat("  - Total records:", validation_summary$contacts$total_records, "\n")
+cat("  - Complete records:", validation_summary$contacts$total_records, "\n")
+cat("  - Morphotaxa:", validation_summary$contacts$morphotaxon_count, "\n")
+cat("  - Unique species:", validation_summary$contacts$species_count, "\n\n")
+```
+
+### Export CSV files
+
+```{r}
+cover_by_station_and_taxa <- cover_by_station_and_taxa |> 
+  rename(contacts = total_contacts)
+
+write_csv(cover_by_station_and_taxa, file.path(exp_path, 
+                                               "data/primary/output/uvs/", 
+                                               paste(exp_id, "uvs_lpi_cover_by_station_and_taxa.csv", sep = "_")))
+
+station_summary <- station_summary |> 
+  select(ps_station_id, ps_site_id, exp_id, region, subregion, locality, 
+         habitat, exposure, divers, depth_m, depth_strata,
+         n_transects, survey_dist_m, n_points, total_morphotaxa = n_morphotaxa, pct_coral, pct_cca, pct_cyano, everything()) 
+
+write_csv(station_summary, file.path(exp_path, 
+                                               "data/primary/output/uvs/", 
+                                               paste(exp_id, "uvs_lpi_station_summary.csv", sep = "_")))
+
+clean_lpi <- clean_lpi |> 
+  select(ps_station_id, exp_id, diver, depth_m, transect_label, transect_section, morphotaxon, accepted_name, accepted_aphia_id, rank, family, functional_group, contacts) 
+
+write_csv(clean_lpi, file.path(exp_path, "data/primary/output/uvs/", 
+                                               paste(exp_id, "uvs_lpi_contacts.csv", sep = "_")))
+```
+
+### Upload to BigQuery
+
+Finally, Upload the validated and processed data to BigQuery, maintaining data integrity and traceability.
+
+```{r}
+bq_table_upload(bq_table("pristine-seas", "uvs", "lpi_stations"),
+                values = station_summary,
+                create_disposition = "CREATE_NEVER",
+                write_disposition = "WRITE_APPEND")
+```
+
+```{r}
+bq_table_upload(bq_table("pristine-seas", "uvs", "lpi_contacts"),
+                values = clean_lpi,
+                create_disposition = "CREATE_NEVER",
+                write_disposition = "WRITE_APPEND")
+```
+
+```{r}
+bq_table_upload(bq_table("pristine-seas", "uvs", "lpi_cover_by_taxa"),
+                values = cover_by_station_and_taxa,
+                create_disposition = "CREATE_NEVER",
+                write_disposition = "WRITE_APPEND")
+```

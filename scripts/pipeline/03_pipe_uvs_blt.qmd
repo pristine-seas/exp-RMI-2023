@@ -1,0 +1,243 @@
+---
+title: "Fish BLT - Data Pipeline"
+date: today
+format: 
+  html:
+    theme: minty
+    self-contained: true
+    code-fold: true
+    toc: true 
+    toc-depth: 3
+    toc-location: right
+    html-table-processing: none
+execute:
+  fig-width: 10
+---
+
+```{r setup, message = F, warning = F, fig.width = 10, fig.height = 10, echo = F}
+options(scipen = 999)
+
+# Hook to format inline numeric expressions with comma separators:
+knitr::knit_hooks$set(inline = function(x) {
+  if (!is.numeric(x)) {
+    # For non-numeric values, just return as character
+    return(as.character(x))
+  }
+  # Format numbers with comma as big.mark, no scientific notation
+  format(x, big.mark = ",", scientific = FALSE)
+})
+
+library(sf)
+library(hms)
+library(readxl)
+library(janitor)
+library(lubridate)
+library(gt)
+library(pointblank)
+library(tidyverse)
+library(bigrquery)
+library(leaflet)
+library(leaflet.extras)
+library(ggtext)
+library(PristineSeasR2)
+
+
+ps_paths <- PristineSeasR2::get_drive_paths()
+
+exp_id <- "RMI_2023"
+
+exp_path <- file.path(ps_paths$expeditions, str_replace(exp_id, "_", "-"))
+
+bigrquery::bq_auth(email = "marine.data.science@ngs.org")
+
+bq_connection <- DBI::dbConnect(bigrquery::bigquery(), project = "pristine-seas")
+```
+
+This documentation outlines the end-to-end pipeline for processing fish Belt Line Transect (BLT) survey data collected during Pristine Seas expeditions. The pipeline ingests raw field data, standardizes formats, performs taxonomy lookups, applies rigorous quality assurance/quality control (QA/QC), computes station-level summaries, and loads the clean data into the Pristine Seas Science Database in BigQuery.
+
+## Data ingestion
+
+### Sites
+
+We begin by reading the UVS (Underwater Visual Survey) site information.
+  
+```{r}
+uvs_sites <- tbl(bq_connection, "uvs.sites") |> 
+  filter(exp_id == "RMI_2023") |> 
+  collect()
+
+# Validate site data
+cat("Sites loaded:", nrow(uvs_sites), "\n")
+cat("Regions:", unique(uvs_sites$region), "\n")
+cat("Subregions:", unique(uvs_sites$subregion), "\n")
+```
+
+### Fieldbooks
+
+Process field observations from different divers, ensuring consistent formatting and traceability.
+
+  - Field names are harmonized, and units are standardized.
+  - Unique observation IDs (obs_id) are generated for QA/QC.
+  - Field data is cleaned and formatted to ensure database compatibility.
+
+```{r}
+raw_obs <- readxl::read_xlsx(file.path(exp_path, "data/primary/raw/fish/RMI_2023_fish_fieldbook_AMF.xlsx"),
+                               sheet = "observations") |> 
+  as_tibble() |> 
+  rename(count = n_ind) |> 
+  mutate(station_label = str_to_lower(depth_strata),
+         site_number = as.numeric(str_extract(ps_site_id, "(\\d)+")),
+         ps_site_id  = paste("RMI_2023_uvs", str_pad(site_number, 3, pad = "0"), sep = "_"),
+         obs_id = paste("RMI_2023_fish", diver, str_pad(row_number(), 3, pad = "0"), sep = "_"),
+         diver = "Alan Friedlander") |> 
+  select(obs_id, ps_site_id, diver,  depth_m, station_label, transect, taxon_code, min_tl_cm, max_tl_cm, count, terminal_phase, notes)
+
+# Replace taxon code with taxa names
+
+fish_codes <- readxl::read_xlsx(file.path(exp_path, "data/primary/raw/fish/RMI_2023_fish_fieldbook_AMF.xlsx"),
+                               sheet = "fish_codes") |> 
+  distinct(taxon_code, taxon_name = taxon_valid_name)
+
+raw_obs <- raw_obs |> 
+  left_join(fish_codes) |> 
+  relocate(taxon_name, .after = taxon_code) |> 
+  select(-taxon_code)
+
+cat("\nObservations loaded:", nrow(raw_obs), "\n")
+```
+
+### Stations
+
+Extract and process station-level information, creating unique identifiers based on depth strata
+
+  - Group observations by site, diver, and station label.
+  - Assign depth strata based on average depth.
+  - Generate unique ps_station_id based on site and depth information.
+  - Summarize sampling effort per station, including the total survey area.
+  
+```{r}
+# Process station data
+raw_stations <- raw_obs |>
+  group_by(ps_site_id, diver, station_label) |>
+  summarise( avg_depth_m = round(mean(depth_m, na.rm = TRUE), 0),
+             n_transects = n_distinct(transect),
+             # Calculate survey area based on size-dependent belt widths
+             # 25m x 4m for fish ≥ 20cm; 25m x 2m for fish < 20cm
+             survey_area_m2 = n_transects * (25 * 4 + 25 * 2),
+             .groups = "drop") |>
+  mutate(protocol = "fish_blt",
+         depth_strata = stratify(avg_depth_m),
+         ps_station_id = paste0(ps_site_id, "_", station_suffix(depth_strata))) |>
+  select(ps_station_id, ps_site_id, protocol, depth_m = avg_depth_m, 
+         depth_strata, diver, station_label, n_transects, survey_area_m2)
+
+# Join station IDs back to observations
+raw_obs <- raw_obs |> 
+  left_join(raw_stations |> 
+              select(ps_station_id, ps_site_id, diver, station_label, depth_strata),
+            by = c("ps_site_id", "diver", "station_label")) |> 
+  relocate(ps_station_id, .after = ps_site_id) |> 
+  relocate(depth_strata, .after = ps_station_id) 
+
+# Merge site information with stations
+raw_stations <- raw_stations |> 
+  left_join(uvs_sites, by = "ps_site_id")
+```
+
+## QA/QC Process
+
+### Stations
+
+Validate station data to ensure consistency and completeness.
+
+  - Ensure station IDs are unique
+  - Flag discrepancies between station labels and depth strata
+  - Confirm the correct number of transects (typically 3 per station).
+
+```{r}
+# Station QA/QC using pointblank
+station_qaqc <- raw_stations |> 
+  create_agent(label = "Fish BLT Stations QA/QC", tbl_name = "raw_stations") |> 
+  rows_distinct(ps_station_id,
+                label = "Station IDs are unique",
+                actions = action_levels(stop_at = 0.001)) |> 
+  col_vals_equal(columns = vars(station_label), 
+                 value = vars(depth_strata),
+                 label = "Station label matches depth strata",
+                 actions = action_levels(warn_at = 0.01)) |>
+  col_vals_equal(columns = vars(n_transects), 
+                 value = 2,
+                 label = "Expected 2 transects per station",
+                 actions = action_levels(warn_at = 0.001)) |>
+  interrogate()
+
+# Display QA/QC results
+station_qaqc
+```
+
+```{r}
+# Create final station dataframe
+stations <- raw_stations |> 
+  select(ps_station_id, ps_site_id, exp_id,              
+         region, subregion, locality, habitat, exposure, 
+         diver, depth_m, depth_strata,          
+         n_transects, survey_area_m2,                  
+         notes)
+```
+
+
+```{r map}
+#| label: fig-map
+#| fig-cap: "Interactive map of BLT survey stations"
+
+# Create spatial features
+
+fish_sites_sf <- uvs_sites |> 
+  select(ps_site_id, region, subregion, locality, habitat, exposure, latitude, longitude) |> 
+  inner_join(
+    stations |> 
+      group_by(ps_site_id) |> 
+      summarize(team = paste(unique(diver), collapse = "/"),
+                strata = paste(unique(paste(depth_strata, " (", depth_m, "m)", sep = "")), 
+                               collapse = "\n"),
+                survey_area = sum(survey_area_m2),
+                n_stations = n_distinct(ps_station_id),
+                .groups = "drop"),
+    by = "ps_site_id") |> 
+  sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326) 
+
+# Create interactive map
+mapview::mapview(fish_sites_sf,
+                 zcol = "exposure",
+                 legend = TRUE,
+                 col.regions = ps_colors("exposure"),
+                 map.types = "Esri.WorldImagery",
+                 layer.name = "Exposure",
+                 popup = leafpop::popupTable(fish_sites_sf, 
+                                             zcol = c("ps_site_id", "strata", "team", "survey_area", "habitat", "exposure"))) |> 
+  leafem::addMouseCoordinates() |> 
+  addFullscreenControl()
+```
+
+```{r eval = T, include = T}
+#| label: tbl-fish-stations
+#| tbl-cap: "Number of fish survey stations by depth strata"
+
+stations |> 
+  group_by(region, subregion, depth_strata) |>
+  summarise(n = n_distinct(ps_station_id), .groups = "drop") |> 
+  pivot_wider(names_from = depth_strata, values_from = n, values_fill = 0) |> 
+  mutate(Total = rowSums(across(where(is.numeric)), na.rm = TRUE)) |>
+  gt(groupname_col = "region") |> 
+  tab_options(table.font.size = 12,
+              data_row.padding = px(5),
+              table.width = pct(90),
+              row_group.as_column = TRUE) |> 
+  tab_source_note(source_note = "Depth strata: supershallow (< 6 m), shallow (7-14 m), deep (15-30 m)") |> 
+  tab_spanner(label = "Depth Strata", 
+              columns = c("deep", "shallow")) |> 
+  cols_label(subregion = "Subregion") |>
+  fmt_number(columns = where(is.numeric), decimals = 0)
+```
+
+**Summary:** We conducted fish surveys at **`r n_distinct(stations$ps_site_id)`** sites and **`r n_distinct(stations$ps_station_id)`** stations during the `r exp_id` expedition. Across **`r n_distinct(stations$region)`** regions, we surveyed a total area of **`r sum(stations$survey_area_m2)`** m² of reef habitats.
