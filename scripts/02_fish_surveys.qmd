@@ -211,6 +211,14 @@ save(fish_taxa, biomass_by_obs, biomass_by_strata_and_taxa,
      file = file.path(exp_path, "data/primary/output/fish_surveys.Rdata"))
 ```
 
+```{r}
+biomass_by_obs |> 
+  filter(ind_m2>0) |> 
+  left_join(fish_meta |> distinct(ps_station_id, location, exposure, habitat, local_time, lat, lon, date, team_lead))|> 
+  select(ps_station_id, location, exposure, habitat, date, local_time, lat, lon, everything()) 
+  write_csv(file.path(exp_path, "data/primary/output/biomass_by_obs_clean.csv"))
+```
+
 # High level summary
 
 ```{r}
@@ -509,4 +517,226 @@ ggsave(tst,
        filename = file.path(exp_path, "figures/Bikini-Rongerik/test_fish_biomass_by_family.png"), width = 10)
 ```
 
+# PCOA
 
+```{r community_adonis, include = T, eval = T}
+#| label: tbl-comm-adonis
+#| tbl-cap: Fish assemblages Adonis model 
+#| tbl-cap-location: top
+#| 
+gr_m2_data_wide <- biomass_by_strata_and_taxa %>% 
+  mutate(strata_id = paste(ps_station_id, paste0(depth_m, "m"), "AMF", sep = "_")) |> 
+  select(strata_id, taxon_valid_name, gr_m2) |> 
+  pivot_wider(names_from = taxon_valid_name, values_from = gr_m2) %>% 
+  column_to_rownames("strata_id")
+
+gr_m2_dist <- vegan::vegdist(as.matrix(gr_m2_data_wide), 
+                             method = "bray") 
+
+community_adonis <- vegan::adonis2(gr_m2_dist ~  location + exposure + habitat + depth_strata,
+                                   data = summary_by_strata,
+                                   by = "margin")
+
+tbl_adonis_community <- broom::tidy(community_adonis) %>% 
+  mutate_if(is.numeric, round, 3) %>% 
+  gt() |> 
+  tab_header(title = "Results of community composition Adonis model") |> 
+  tab_options(ihtml.use_compact_mode = TRUE,
+              data_row.padding = px(5))
+
+gt::gtsave(tbl_adonis_community, 
+           filename = file.path(exp_path, "tables", "fish-surveys/community_adonis.docx"))
+```
+
+```{r pcoa_plot, include = T, eval = T, fig.width = 8, fig.height = 8}
+#| label: fig-pcoa
+#| fig-cap: "Principal coordinates analysis"
+library(vegan)
+
+gr_m2_pcoa_c <- vegan::dbrda(gr_m2_dist ~ location + exposure + depth_strata + habitat, 
+                             data = summary_by_strata,
+                             dist = "bray", 
+                             add = "lingoes")
+
+gr_m2_pcoa_c_env_fit <- vegan::envfit(gr_m2_pcoa_c, 
+                                      summary_by_strata %>% 
+                                        select(location, exposure, depth_strata, habitat))
+
+gr_m2_pcoa_c_spp_fit <- vegan::envfit(gr_m2_pcoa_c, 
+                                      gr_m2_data_wide)
+
+gr_m2_pcoa_c_spp_scores <- gr_m2_pcoa_c_spp_fit %>% 
+  vegan::scores("vectors") %>% 
+  as_tibble(rownames = "ps_taxon_code") %>% 
+  mutate(r = gr_m2_pcoa_c_spp_fit$vectors$r,
+         p = gr_m2_pcoa_c_spp_fit$vectors$pvals) %>% 
+  filter(p < 0.05, r > 0.1)
+
+gr_m2_pcoa_c_axis <- BiodiversityR::axis.long(gr_m2_pcoa_c, choices = c(1, 2))
+
+gr_m2_pcoa_c_site_scores <- vegan::scores(gr_m2_pcoa_c)$sites %>% 
+  as_tibble(rownames = "strata_id") %>% 
+  inner_join(summary_by_strata |>
+                 mutate(strata_id = paste(ps_station_id, paste0(depth_m, "m"), "AMF", sep = "_"))
+             )
+
+ggplot() +
+  geom_vline(xintercept = c(0), color = "grey70", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "grey70", linetype = 2) +  
+  scale_x_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +
+  scale_y_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +
+  geom_point(data = gr_m2_pcoa_c_site_scores,
+             aes(x = dbRDA1, y = dbRDA2, col = location)) +
+  labs(x = gr_m2_pcoa_c_axis$label[1], y = gr_m2_pcoa_c_axis$label[2])+
+  geom_segment(data = gr_m2_pcoa_c_spp_scores %>% 
+                 filter(p < 0.05, r > 0.25), 
+               aes(x = 0, y = 0, xend = dbRDA1*3, yend = dbRDA2*3, alpha = r), 
+               colour = "black", 
+               size = 0.2, 
+               arrow = arrow(length = unit(0.01, "npc"), 
+                             type = 'open', ends = "last"))+
+  ggrepel::geom_text_repel(data = gr_m2_pcoa_c_spp_scores %>% 
+                             filter(p < 0.05, r > 0.25), 
+                           aes(x=dbRDA1*3, y=dbRDA2*3, label = ps_taxon_code, alpha = r),
+                           colour="black",
+                           show.legend = F)+ 
+  coord_fixed(ratio=1)+
+  labs(color = "", alpha = bquote('R'^'2'))+
+  ggforce::geom_mark_ellipse(data = gr_m2_pcoa_c_site_scores, 
+                             aes(x=dbRDA1, y = dbRDA2, colour = location, 
+                                 fill=after_scale(alpha(colour, 0.01))), 
+                             expand=0, size=0.2, show.legend=FALSE)+
+  theme(panel.background = element_blank(),
+        panel.border = element_blank(),
+        panel.grid = element_blank(),
+        axis.line = element_line("gray25"),
+        text = element_text(size = 12),
+        axis.text = element_text(size = 10, colour = "gray25"),
+        axis.title = element_text(size = 12, colour = "gray25"),
+        legend.key = element_blank())+
+  #scale_color_manual(values = ps_palettes$location)+
+  scale_alpha(range=c(0.6,1))
+
+ggsave(file.path(exp_path, "figures", "biomass_pcoa_by_location.pdf"), 
+       width = 10, height = 10)
+```
+
+```{r pcoa_anova, include = T, eval = T}
+#| label: tbl-comm-anove
+#| tbl-cap: Results of ANOVA on the ordination model 
+#| tbl-cap-location: top
+tbl_anova_pcoa <- anova(gr_m2_pcoa_c, 
+      by = "terms",
+      perm.max = 500) |> 
+  broom::tidy() |> 
+  mutate_if(is.numeric, round, 3) %>% 
+  gt() |> 
+  gt::tab_header(title = "Significance of each term in the ordination model") 
+
+gt::gtsave(tbl_anova_pcoa, 
+           filename = file.path(exp_path, "tables", "anova_pcoa.docx"))
+```
+
+## by Trophic
+
+```{r}
+summary_by_strata_and_trophic <- biomass_by_strata_and_taxa |> 
+  left_join(fish_meta |> distinct(ps_station_id, location)) |> 
+  left_join(fish_taxa |> distinct(taxon_valid_name, common_family, trophic)) |> 
+  group_by(location, ps_station_id, depth_m, depth_strata, trophic) |> 
+  summarise(across(c("ind_m2",  "gr_m2"), sum, na.rm = T)) |> 
+  ungroup()
+
+gr_m2_data_wide <- summary_by_strata_and_trophic %>% 
+  mutate(strata_id = paste(ps_station_id, paste0(depth_m, "m"), "AMF", sep = "_")) |> 
+  select(strata_id, trophic, gr_m2) |> 
+  pivot_wider(names_from = trophic, values_from = gr_m2) %>% 
+  column_to_rownames("strata_id")
+
+gr_m2_dist <- vegan::vegdist(as.matrix(gr_m2_data_wide), 
+                             method = "bray") 
+
+community_adonis <- vegan::adonis2(gr_m2_dist ~  location + exposure + habitat + depth_strata,
+                                   data = summary_by_strata,
+                                   by = "margin")
+
+(tbl_adonis_community <- broom::tidy(community_adonis) %>% 
+  mutate_if(is.numeric, round, 3) %>% 
+  gt() |> 
+  tab_header(title = "Results of community composition Adonis model") |> 
+  tab_options(ihtml.use_compact_mode = TRUE,
+              data_row.padding = px(5)))
+```
+
+```{r pcoa_plot, include = T, eval = T, fig.width = 8, fig.height = 8}
+#| label: fig-pcoa
+#| fig-cap: "Principal coordinates analysis"
+library(vegan)
+
+gr_m2_pcoa_c <- vegan::dbrda(gr_m2_dist ~ location + exposure + depth_strata + habitat, 
+                             data = summary_by_strata,
+                             dist = "bray", 
+                             add = "lingoes")
+
+gr_m2_pcoa_c_env_fit <- vegan::envfit(gr_m2_pcoa_c, 
+                                      summary_by_strata %>% 
+                                        select(location, exposure, depth_strata, habitat))
+
+gr_m2_pcoa_c_spp_fit <- vegan::envfit(gr_m2_pcoa_c, 
+                                      gr_m2_data_wide)
+
+gr_m2_pcoa_c_spp_scores <- gr_m2_pcoa_c_spp_fit %>% 
+  vegan::scores("vectors") %>% 
+  as_tibble(rownames = "trophic") %>% 
+  mutate(r = gr_m2_pcoa_c_spp_fit$vectors$r,
+         p = gr_m2_pcoa_c_spp_fit$vectors$pvals) %>% 
+  filter(p < 0.05, r > 0.1)
+
+gr_m2_pcoa_c_axis <- BiodiversityR::axis.long(gr_m2_pcoa_c, choices = c(1, 2))
+
+gr_m2_pcoa_c_site_scores <- vegan::scores(gr_m2_pcoa_c)$sites %>% 
+  as_tibble(rownames = "strata_id") %>% 
+  inner_join(summary_by_strata |>
+                 mutate(strata_id = paste(ps_station_id, paste0(depth_m, "m"), "AMF", sep = "_"))
+             )
+
+ggplot() +
+  geom_vline(xintercept = c(0), color = "grey70", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "grey70", linetype = 2) +  
+  scale_x_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +
+  scale_y_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +
+  geom_point(data = gr_m2_pcoa_c_site_scores,
+             aes(x = dbRDA1, y = dbRDA2, col = location)) +
+  labs(x = gr_m2_pcoa_c_axis$label[1], y = gr_m2_pcoa_c_axis$label[2])+
+  geom_segment(data = gr_m2_pcoa_c_spp_scores %>% 
+                 filter(p < 0.05, r > 0.25), 
+               aes(x = 0, y = 0, xend = dbRDA1*3, yend = dbRDA2*3, alpha = r), 
+               colour = "black", 
+               size = 0.2, 
+               arrow = arrow(length = unit(0.01, "npc"), 
+                             type = 'open', ends = "last"))+
+  ggrepel::geom_text_repel(data = gr_m2_pcoa_c_spp_scores %>% 
+                             filter(p < 0.05, r > 0.25), 
+                           aes(x=dbRDA1*3, y=dbRDA2*3, label = trophic, alpha = r),
+                           colour="black",
+                           show.legend = F)+ 
+  coord_fixed(ratio=1)+
+  labs(color = "", alpha = bquote('R'^'2'))+
+  ggforce::geom_mark_ellipse(data = gr_m2_pcoa_c_site_scores, 
+                             aes(x=dbRDA1, y = dbRDA2, colour = location, 
+                                 fill=after_scale(alpha(colour, 0.01))), 
+                             expand=0, size=0.2, show.legend=FALSE)+
+  theme(panel.background = element_blank(),
+        panel.border = element_blank(),
+        panel.grid = element_blank(),
+        axis.line = element_line("gray25"),
+        text = element_text(size = 12),
+        axis.text = element_text(size = 10, colour = "gray25"),
+        axis.title = element_text(size = 12, colour = "gray25"),
+        legend.key = element_blank())+
+  #scale_color_manual(values = ps_palettes$location)+
+  scale_alpha(range=c(0.6,1))
+
+ggsave(file.path(exp_path, "figures", "biomass_pcoa_by_location_trophic_group.pdf"), 
+       width = 12, height = 12)
+```

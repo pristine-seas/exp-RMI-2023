@@ -24,7 +24,6 @@ exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
 ps_data_path <- file.path(ps_science_path, "datasets/")
 ```
 
-
 # Bikar and Bokak MPA proposals
 
 ```{r}
@@ -350,33 +349,53 @@ square_buffers <- st_as_sf(bokak_buffer_35nm) |>
   bind_rows(st_as_sf(bikar_buffer_35nm) |> 
               mutate(proposal = "Square buffer (35 nm) - Bikak")) 
   
-
 coords_proposal_35nm <- sf::st_coordinates(proposal_35nm) |> 
   as_tibble() |> 
-  mutate(proposal = "Connecting rectangle (35nm)") 
+  mutate(proposal = "Scenario 3: Connecting rectangle (35nm)") |> 
+  distinct()
 
 coords_proposal_30nm <- sf::st_coordinates(proposal_30nm) |> 
   as_tibble() |> 
-  mutate(proposal = "Connecting rectangle (350nm)") 
+  mutate(proposal = "Scenario 2: Connecting rectangle (30nm)") |> 
+  distinct()
 
 coords_proposal_buffer_bokak <- sf::st_coordinates(bokak_buffer_35nm) |> 
   as_tibble() |> 
-  mutate(proposal = "Square buffer (35 nm) - Bokak") 
+  mutate(proposal = "Scenario 1: Square buffers (35 nm) - Bokak") |> 
+  distinct()
 
 coords_proposal_buffer_bikar <- sf::st_coordinates(bikar_buffer_35nm) |> 
   as_tibble() |> 
-  mutate(proposal = "Square buffer (35 nm) - Bikar")
+  mutate(proposal = "Scenario 1: Square buffers (35 nm) - Bikar")|> 
+  distinct()
 
 tbl <- bind_rows(coords_proposal_buffer_bikar, 
-          coords_proposal_buffer_bokak,
-          coords_proposal_30nm,
-          coords_proposal_35nm) |> 
+                 coords_proposal_buffer_bokak,
+                 coords_proposal_30nm,
+                 coords_proposal_35nm) |> 
   select(proposal, lon = X, lat = Y) |> 
-  gt::gt()
+  gt::gt() |> 
+  gt::cols_label(
+    lon = "Longitude",
+    lat = "Latitude",
+    proposal = "Scenario") |> 
+  gt::tab_header(title = "Coordinates of proposed MPA boundaries")
   
 gt::gtsave(tbl,
            filename  = file.path(exp_path, "data/primary/processed/proposals/proposals_coords.docx"))
 ```
+
+```{r}
+coords_proposal_35nm |> 
+  st_as_sf(coords = c("X", "Y"), crs = 4326) |> 
+  group_by(proposal) |> 
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("POLYGON") |> 
+  ggplot()+
+  geom_sf(aes(col = proposal), fill = "NA")
+```
+
+
 
 ```{r}
 bikar_bokak_proposals <- square_buffers |> 
@@ -389,7 +408,7 @@ bikar_bokak_proposals <- bikar_bokak_proposals |>
   mutate(area_km2 = round(as.numeric(st_area(geometry)/10^6))) |> 
   select(proposal, area_km2)
 
-sf::st_write(bikar_bokak_proposals, file.path(exp_path, "data/primary/processed/proposals/all_proposals.gpkg"))
+sf::st_write(bikar_bokak_proposals, file.path(exp_path, "data/primary/processed/proposals/all_proposals.gpkg"), append = F) 
 
 bikar_bokak_proposals |> 
   ggplot()+

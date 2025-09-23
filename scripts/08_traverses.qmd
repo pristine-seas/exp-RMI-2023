@@ -1,0 +1,44 @@
+---
+title: "Traverses"
+format: html
+editor: visual
+---
+
+## Traverses
+
+```{r, message = F, warning = F, fig.width = 10, fig.height = 10, echo = F}
+library(paletteer)
+library(sf)
+library(bigrquery)
+library(gt)
+library(tidyverse)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+exp_id <- "RMI_2023"
+
+exp_path <- file.path(ps_science_path, "expeditions", "RMI-2023")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+bigrquery::bq_auth(email = "marine.data.science@ngs.org")
+
+bq_connection <- DBI::dbConnect(bigrquery::bigquery(), project = "pristine-seas")
+
+#grep("RMI", OlsonNames(), value=TRUE)
+```
+
+```{r}
+travs <- sf::st_read(file.path(exp_path, "data/primary/raw/traverses/shapefile/traverses_export.shp"))
+
+travs |> 
+  as_tibble() |> 
+  janitor::clean_names() |> 
+  mutate(location = if_else(traverse_i == 0 , "Rongerik", "Bikini"),
+         distance = if_else(dist_unit == "Feet", distance, 3.28084*distance)) |> 
+  select(location, traverse_id = traverse_i, distance, origin_x, origin_y, dest_x, dest_y) |> 
+  write_csv(file.path(exp_path, "data/primary/processed/traverses.csv"))
+```
+
